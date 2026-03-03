@@ -1,9 +1,21 @@
+"""Application configuration loaded from environment variables and .env file.
+
+Uses Pydantic Settings to map environment variables to typed fields.
+See .env.example for a complete template.
+"""
+
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """Application settings populated from environment variables.
+
+    All fields map to uppercase env vars (e.g. ``telegram_api_id`` ← ``TELEGRAM_API_ID``).
+    A ``.env`` file in the project root is loaded automatically.
+    """
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     # Telegram API
@@ -27,4 +39,8 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    """Return the cached singleton Settings instance.
+
+    Used as a FastAPI dependency via ``Depends(get_settings)``.
+    """
     return Settings()

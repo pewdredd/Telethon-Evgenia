@@ -1,3 +1,10 @@
+"""FastAPI application entry point.
+
+Defines the app, lifespan (startup/shutdown), Pydantic request/response
+models, and HTTP endpoints: ``POST /send``, ``GET /health``,
+``POST /auth/send-code``, ``POST /auth/verify``.
+"""
+
 import os
 from contextlib import asynccontextmanager
 
@@ -44,6 +51,29 @@ class HealthResponse(BaseModel):
     account: str | None = None
 
 
+class SendCodeRequest(BaseModel):
+    phone: str = Field(..., min_length=7)
+
+
+class SendCodeResponse(BaseModel):
+    ok: bool
+    phone_code_hash: str | None = None
+    error: str | None = None
+
+
+class VerifyCodeRequest(BaseModel):
+    phone: str
+    code: str
+    phone_code_hash: str
+    password: str | None = None
+
+
+class VerifyCodeResponse(BaseModel):
+    ok: bool
+    account: str | None = None
+    error: str | None = None
+
+
 # --- Routes ---
 
 @app.post("/send", response_model=SendResponse)
@@ -55,7 +85,6 @@ async def post_send(
     if not await rate_limiter.is_quota_available(settings.max_messages_per_day):
         raise HTTPException(status_code=429, detail="Daily message quota exhausted")
 
-    # Convert numeric recipient strings to int for Telethon
     recipient: str | int = body.recipient
     if body.recipient.isdigit():
         recipient = int(body.recipient)
@@ -77,3 +106,90 @@ async def get_health(
         return HealthResponse(status="ok", authorized=False)
     username = f"@{me['username']}" if me.get("username") else str(me["id"])
     return HealthResponse(status="ok", authorized=True, account=username)
+
+
+@app.post("/auth/send-code", response_model=SendCodeResponse)
+async def post_auth_send_code(
+    body: SendCodeRequest,
+    _api_key: str = Depends(verify_api_key),
+) -> SendCodeResponse:
+    """Step 1: send a Telegram login code to the given phone number."""
+    try:
+        phone_code_hash = await telethon_client.send_code(body.phone)
+        return SendCodeResponse(ok=True, phone_code_hash=phone_code_hash)
+    except Exception as exc:
+        return SendCodeResponse(ok=False, error=str(exc))
+
+
+@app.post("/auth/verify", response_model=VerifyCodeResponse)
+async def post_auth_verify(
+    body: VerifyCodeRequest,
+    _api_key: str = Depends(verify_api_key),
+) -> VerifyCodeResponse:
+    """Step 2: verify the code received from Telegram and save the session."""
+    try:
+        me = await telethon_client.verify_code(
+            body.phone, body.code, body.phone_code_hash, body.password
+        )
+        account = f"@{me['username']}" if me.get("username") else str(me["id"])
+        return VerifyCodeResponse(ok=True, account=account)
+    except Exception as exc:
+        return VerifyCodeResponse(ok=False, error=str(exc))
+
+
+class QrResponse(BaseModel):
+    ok: bool
+    url: str | None = None
+    error: str | None = None
+
+
+class QrWaitResponse(BaseModel):
+    ok: bool
+    account: str | None = None
+    error: str | None = None
+    need_2fa: bool = False
+
+
+class QrPasswordRequest(BaseModel):
+    password: str
+
+
+@app.post("/auth/qr", response_model=QrResponse)
+async def post_auth_qr(
+    _api_key: str = Depends(verify_api_key),
+) -> QrResponse:
+    """Generate a QR login URL. Convert to QR code and scan with Telegram app."""
+    try:
+        url = await telethon_client.qr_login_start()
+        return QrResponse(ok=True, url=url)
+    except Exception as exc:
+        return QrResponse(ok=False, error=str(exc))
+
+
+@app.post("/auth/qr/wait", response_model=QrWaitResponse)
+async def post_auth_qr_wait(
+    _api_key: str = Depends(verify_api_key),
+) -> QrWaitResponse:
+    """Wait up to 60s for the QR to be scanned. Call after /auth/qr."""
+    try:
+        me = await telethon_client.qr_login_wait()
+        account = f"@{me['username']}" if me.get("username") else str(me["id"])
+        return QrWaitResponse(ok=True, account=account)
+    except RuntimeError as exc:
+        if "2FA_REQUIRED" in str(exc):
+            return QrWaitResponse(ok=False, need_2fa=True, error="2FA password required")
+        return QrWaitResponse(ok=False, error=str(exc))
+
+
+@app.post("/auth/qr/password", response_model=QrWaitResponse)
+async def post_auth_qr_password(
+    body: QrPasswordRequest,
+    _api_key: str = Depends(verify_api_key),
+) -> QrWaitResponse:
+    """Submit 2FA password after QR scan if need_2fa was returned."""
+    try:
+        me = await telethon_client.qr_login_2fa(body.password)
+        account = f"@{me['username']}" if me.get("username") else str(me["id"])
+        return QrWaitResponse(ok=True, account=account)
+    except Exception as exc:
+        return QrWaitResponse(ok=False, error=str(exc))
