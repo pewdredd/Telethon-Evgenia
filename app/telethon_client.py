@@ -50,6 +50,10 @@ async def stop_client() -> None:
         _client = None
 
 
+def get_client() -> TelegramClient | None:
+    return _client
+
+
 async def get_me() -> dict | None:
     if _client is None or not _client.is_connected():
         return None

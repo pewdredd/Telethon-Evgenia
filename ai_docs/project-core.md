@@ -210,6 +210,7 @@ Telethon-Evgenia/
 │   ├── main.py                  # FastAPI приложение
 │   ├── telethon_client.py       # Telethon клиент и логика отправки
 │   ├── rate_limiter.py          # Rate limiting и очередь
+│   ├── listener.py              # Listener входящих сообщений от лидов
 │   ├── config.py                # Загрузка конфигурации из .env
 │   └── auth.py                  # API key проверка
 ├── .env.example

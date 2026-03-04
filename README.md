@@ -76,6 +76,34 @@ curl -X POST http://localhost:8000/send \
 
 `recipient` — `@username` или числовой Telegram ID в виде строки.
 
+### GET /incoming — входящие сообщения от лидов
+
+```bash
+curl "http://localhost:8000/incoming?limit=10&unprocessed_only=true" \
+  -H "X-API-Key: your-api-key"
+```
+
+```json
+{
+  "ok": true,
+  "messages": [
+    {
+      "id": 1,
+      "sender_id": "123456",
+      "sender_username": "lead_user",
+      "message_text": "Привет, интересно!",
+      "telegram_message_id": 789,
+      "chat_id": 123456,
+      "received_at": "2026-03-04T12:00:00+00:00",
+      "processed": false
+    }
+  ],
+  "count": 1
+}
+```
+
+Listener автоматически перехватывает ответы от лидов, которым уже писали (по `send_log`). Если задан `INCOMING_WEBHOOK_URL` — входящие также отправляются POST-запросом на указанный URL (для n8n).
+
 ### GET /health — статус сервера
 
 ```bash
@@ -135,6 +163,7 @@ curl -X POST http://localhost:8000/auth/qr/wait -H "X-API-Key: your-api-key"
 | `MIN_DELAY_SECONDS` | `30` | Минимальная задержка между отправками |
 | `MAX_DELAY_SECONDS` | `90` | Максимальная задержка между отправками |
 | `DB_PATH` | `data/send_log.db` | Путь к SQLite базе |
+| `INCOMING_WEBHOOK_URL` | _(пусто)_ | URL для пересылки входящих сообщений (n8n webhook) |
 
 ## Защита от бана
 
@@ -142,6 +171,7 @@ curl -X POST http://localhost:8000/auth/qr/wait -H "X-API-Key: your-api-key"
 - Случайная задержка 30–90 секунд между отправками
 - Жёсткий суточный лимит (по умолчанию 25) — после достижения сервер возвращает HTTP 429 до следующего дня по UTC
 - Все отправки логируются в SQLite (`data/send_log.db`)
+- Listener перехватывает ответы только от лидов из `send_log`
 
 ## Тесты
 

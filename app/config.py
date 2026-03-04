@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # Database
     db_path: str = "data/send_log.db"
 
+    # Listener
+    incoming_webhook_url: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from app import rate_limiter, telethon_client
+from app import listener, rate_limiter, telethon_client
 from app.auth import verify_api_key
 from app.config import Settings, get_settings
 
@@ -23,7 +23,11 @@ async def lifespan(app: FastAPI):
     await rate_limiter.init_db(settings.db_path)
     await telethon_client.start_client(settings)
     rate_limiter.start_worker(telethon_client.send_message, settings)
+    await listener.init_db(settings.db_path)
+    await listener.start_listener(telethon_client.get_client(), settings)
     yield
+    await listener.stop_listener()
+    await listener.close_db()
     await rate_limiter.stop_worker()
     await telethon_client.stop_client()
     await rate_limiter.close_db()
@@ -74,6 +78,23 @@ class VerifyCodeResponse(BaseModel):
     error: str | None = None
 
 
+class IncomingMessageResponse(BaseModel):
+    id: int
+    sender_id: str
+    sender_username: str | None = None
+    message_text: str
+    telegram_message_id: int
+    chat_id: int
+    received_at: str
+    processed: bool
+
+
+class IncomingListResponse(BaseModel):
+    ok: bool
+    messages: list[IncomingMessageResponse]
+    count: int
+
+
 # --- Routes ---
 
 @app.post("/send", response_model=SendResponse)
@@ -106,6 +127,16 @@ async def get_health(
         return HealthResponse(status="ok", authorized=False)
     username = f"@{me['username']}" if me.get("username") else str(me["id"])
     return HealthResponse(status="ok", authorized=True, account=username)
+
+
+@app.get("/incoming", response_model=IncomingListResponse)
+async def get_incoming(
+    limit: int = 50,
+    unprocessed_only: bool = False,
+    _api_key: str = Depends(verify_api_key),
+) -> IncomingListResponse:
+    messages = await listener.get_recent_incoming(limit=limit, unprocessed_only=unprocessed_only)
+    return IncomingListResponse(ok=True, messages=messages, count=len(messages))
 
 
 @app.post("/auth/send-code", response_model=SendCodeResponse)

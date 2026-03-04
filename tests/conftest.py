@@ -5,6 +5,8 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from app.config import Settings, get_settings
+from app.listener import close_db as listener_close_db
+from app.listener import init_db as listener_init_db
 from app.rate_limiter import close_db, init_db, start_worker, stop_worker
 
 
@@ -39,6 +41,13 @@ async def db(test_settings):
 
 
 @pytest_asyncio.fixture
+async def listener_db(test_settings):
+    await listener_init_db(test_settings.db_path)
+    yield
+    await listener_close_db()
+
+
+@pytest_asyncio.fixture
 async def worker(db, mock_send_message, test_settings):
     start_worker(mock_send_message, test_settings)
     yield mock_send_message
@@ -68,6 +77,7 @@ async def client(tmp_path, mock_send_message):
     # ASGITransport doesn't run lifespan, so init manually
     await init_db(settings.db_path)
     start_worker(mock_send_message, settings)
+    await listener_init_db(settings.db_path)
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
@@ -75,6 +85,7 @@ async def client(tmp_path, mock_send_message):
     ) as ac:
         yield ac
 
+    await listener_close_db()
     await stop_worker()
     await close_db()
 

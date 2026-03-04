@@ -34,6 +34,7 @@ app/
 ├── main.py              # FastAPI app, lifespan, route definitions
 ├── telethon_client.py   # Telethon session management & message sending
 ├── rate_limiter.py      # Daily quota, message queue, random delays (30-90s)
+├── listener.py          # Incoming message listener (lead replies)
 ├── config.py            # .env loading via Pydantic settings
 └── auth.py              # API key verification (protects endpoints from unauthorized access)
 ```
@@ -42,8 +43,9 @@ app/
 
 - **POST /send** — send message to a recipient (by `@username` or numeric `user_id`). Returns `{ ok, message_id }` or `{ ok: false, error }`.
 - **GET /health** — server liveness + Telethon session status.
+- **GET /incoming** — retrieve logged incoming messages from known leads. Query params: `limit`, `unprocessed_only`.
 
-Both endpoints are protected by API key auth.
+All endpoints are protected by API key auth.
 
 ## Rate Limiting Defaults
 

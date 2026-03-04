@@ -10,11 +10,13 @@
   - [app/auth.py — API Key Authentication](#appauthpy--api-key-authentication)
   - [app/telethon_client.py — Telegram Client](#apptelethon_clientpy--telegram-client)
   - [app/rate_limiter.py — Rate Limiting & Queue](#apprate_limiterpy--rate-limiting--queue)
+  - [app/listener.py — Incoming Message Listener](#applistenerpy--incoming-message-listener)
   - [app/main.py — FastAPI Application](#appmainpy--fastapi-application)
   - [app/auth_session.py — Interactive Session Setup](#appauth_sessionpy--interactive-session-setup)
 - [API Reference](#api-reference)
   - [POST /send](#post-send)
   - [GET /health](#get-health)
+  - [GET /incoming](#get-incoming)
   - [POST /auth/send-code](#post-authsend-code)
   - [POST /auth/verify](#post-authverify)
   - [POST /auth/qr](#post-authqr)
@@ -65,6 +67,14 @@ n8n (external orchestrator)
 │  │ TelegramClient (MTProto user-bot)    │    │
 │  └──────────────────────────────────────┘    │
 │         │                                    │
+│         │  ┌──────────────────────────────┐  │
+│         │  │ listener.py                  │  │
+│         │  │ Incoming message listener    │  │
+│         │  │ (private msgs from leads)    │  │
+│         │  │  → incoming_log (SQLite)     │  │
+│         │  │  → callbacks / webhook       │  │
+│         │  └──────────────────────────────┘  │
+│         │                                    │
 └─────────┼────────────────────────────────────┘
           ▼
       Telegram
@@ -84,10 +94,10 @@ n8n (external orchestrator)
 
 ```
 startup:
-  init_db()  →  start_client()  →  start_worker()
+  init_db()  →  start_client()  →  start_worker()  →  listener.init_db()  →  listener.start_listener()
 
 shutdown:
-  stop_worker()  →  stop_client()  →  close_db()
+  listener.stop_listener()  →  listener.close_db()  →  stop_worker()  →  stop_client()  →  close_db()
 ```
 
 ---
@@ -118,6 +128,7 @@ Pydantic v2 settings model. All fields map to environment variables (case-insens
 | `min_delay_seconds` | `int` | `30` | `MIN_DELAY_SECONDS` | Minimum random delay between sends (seconds) |
 | `max_delay_seconds` | `int` | `90` | `MAX_DELAY_SECONDS` | Maximum random delay between sends (seconds) |
 | `db_path` | `str` | `"data/send_log.db"` | `DB_PATH` | SQLite database file path |
+| `incoming_webhook_url` | `str` | `""` | `INCOMING_WEBHOOK_URL` | Webhook URL for forwarding incoming messages (empty = disabled) |
 
 #### `get_settings() -> Settings`
 
@@ -170,6 +181,10 @@ Creates and connects the `TelegramClient` using credentials from `settings`. Log
 #### `stop_client() -> None`
 
 Disconnects the client and sets the module-level reference to `None`.
+
+#### `get_client() -> TelegramClient | None`
+
+Returns the module-level `TelegramClient` instance, or `None` if not started. Used by `listener.py` to register event handlers.
 
 #### `get_me() -> dict | None`
 
@@ -318,6 +333,90 @@ The background worker loop:
 
 ---
 
+### `app/listener.py` — Incoming Message Listener
+
+Listens for incoming private messages via Telethon's `NewMessage` event. Filters for known recipients (leads already contacted via `send_log`), logs them to `incoming_log`, and dispatches to registered callbacks and an optional webhook URL.
+
+#### Database Functions
+
+##### `init_db(db_path: str) -> None`
+
+Opens an `aiosqlite` connection and creates the `incoming_log` table. Uses the same SQLite file as `rate_limiter` (shared `send_log` table for recipient matching).
+
+##### `close_db() -> None`
+
+Closes the database and HTTP client connections.
+
+##### `log_incoming(sender_id, sender_username, message_text, telegram_message_id, chat_id) -> int`
+
+Inserts a record into `incoming_log`. Returns the row ID.
+
+##### `get_recent_incoming(limit=50, unprocessed_only=False) -> list[IncomingMessage]`
+
+Returns recent incoming messages ordered by ID descending. Optionally filters to unprocessed only.
+
+##### `mark_processed(incoming_id: int) -> None`
+
+Sets `processed = 1` for the given record. Used by future LLM pipeline.
+
+#### Recipient Matching
+
+##### `_is_known_recipient(sender_id: int, sender_username: str | None) -> bool`
+
+Checks `send_log` for successful sends to the given sender (by numeric ID or `@username`). Returns `False` on any error (safe fallback).
+
+#### Callback Mechanism
+
+##### `IncomingMessage` (TypedDict)
+
+```python
+class IncomingMessage(TypedDict):
+    id: int
+    sender_id: str
+    sender_username: str | None
+    message_text: str
+    telegram_message_id: int
+    chat_id: int
+    received_at: str
+    processed: bool
+```
+
+##### `add_incoming_handler(callback) -> None`
+
+Register an async callback `Callable[[IncomingMessage], Awaitable[None]]` to be called on each incoming message from a known lead.
+
+##### `remove_incoming_handler(callback) -> None`
+
+Unregister a previously added callback.
+
+#### Webhook Forwarding
+
+If `settings.incoming_webhook_url` is set, each incoming message is POSTed as JSON to that URL via `httpx.AsyncClient`. Fire-and-forget: errors are logged but don't block processing.
+
+#### Event Handler
+
+##### `_on_new_message(event, settings) -> None`
+
+Telethon event handler for `events.NewMessage(incoming=True, outgoing=False, func=lambda e: e.is_private)`:
+
+1. Skips messages without text (media-only)
+2. Checks if sender is a known recipient via `_is_known_recipient()`
+3. Logs to `incoming_log`
+4. Dispatches to registered callbacks
+5. Forwards to webhook (if configured)
+
+#### Lifecycle
+
+##### `start_listener(client, settings) -> None`
+
+Registers the event handler on the Telethon client. No-op if client is `None`.
+
+##### `stop_listener() -> None`
+
+Clears all registered callbacks and releases the client reference.
+
+---
+
 ### `app/main.py` — FastAPI Application
 
 The main application module. Defines the FastAPI app, lifespan, request/response models, and route handlers.
@@ -326,8 +425,8 @@ The main application module. Defines the FastAPI app, lifespan, request/response
 
 Async context manager for application lifecycle:
 
-- **Startup:** `init_db()` → `start_client()` → `start_worker()`
-- **Shutdown:** `stop_worker()` → `stop_client()` → `close_db()`
+- **Startup:** `init_db()` → `start_client()` → `start_worker()` → `listener.init_db()` → `listener.start_listener()`
+- **Shutdown:** `listener.stop_listener()` → `listener.close_db()` → `stop_worker()` → `stop_client()` → `close_db()`
 
 Also ensures the database directory exists (`os.makedirs`).
 
@@ -347,6 +446,12 @@ Also ensures the database directory exists (`os.makedirs`).
 `GET /health` — Check server and Telegram session status.
 
 Returns authorized account info or `{authorized: false}`.
+
+##### `get_incoming(limit, unprocessed_only) -> IncomingListResponse`
+
+`GET /incoming` — Retrieve logged incoming messages from known leads.
+
+Query params: `limit` (default 50), `unprocessed_only` (default false).
 
 ##### `post_auth_send_code(body: SendCodeRequest) -> SendCodeResponse`
 
@@ -466,6 +571,44 @@ If the Telethon session is disconnected or not authorized:
   "account": null
 }
 ```
+
+---
+
+### GET /incoming
+
+Retrieve incoming messages from known leads (recipients already in `send_log`).
+
+**Authentication:** `X-API-Key` header (required)
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit` | `int` | `50` | Maximum number of messages to return |
+| `unprocessed_only` | `bool` | `false` | Only return messages not yet marked as processed |
+
+**Success Response (200):**
+
+```json
+{
+  "ok": true,
+  "messages": [
+    {
+      "id": 1,
+      "sender_id": "123456",
+      "sender_username": "lead_user",
+      "message_text": "Hello!",
+      "telegram_message_id": 789,
+      "chat_id": 123456,
+      "received_at": "2026-03-04T12:00:00+00:00",
+      "processed": false
+    }
+  ],
+  "count": 1
+}
+```
+
+Messages are ordered by ID descending (newest first).
 
 ---
 
@@ -716,6 +859,29 @@ class QrWaitResponse(BaseModel):
     need_2fa: bool = False
 ```
 
+#### `IncomingMessageResponse`
+
+```python
+class IncomingMessageResponse(BaseModel):
+    id: int
+    sender_id: str
+    sender_username: str | None = None
+    message_text: str
+    telegram_message_id: int
+    chat_id: int
+    received_at: str
+    processed: bool
+```
+
+#### `IncomingListResponse`
+
+```python
+class IncomingListResponse(BaseModel):
+    ok: bool
+    messages: list[IncomingMessageResponse]
+    count: int
+```
+
 ---
 
 ## Database Schema
@@ -748,6 +914,34 @@ CREATE TABLE IF NOT EXISTS send_log (
 
 Quota enforcement queries this table: counts rows where `status='success'` and `sent_at >= today midnight UTC`.
 
+### Table: `incoming_log`
+
+```sql
+CREATE TABLE IF NOT EXISTS incoming_log (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender_id           TEXT NOT NULL,
+    sender_username     TEXT,
+    message_text        TEXT NOT NULL,
+    telegram_message_id INTEGER NOT NULL,
+    chat_id             INTEGER NOT NULL,
+    received_at         TEXT NOT NULL,
+    processed           INTEGER NOT NULL DEFAULT 0
+)
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `INTEGER` | Auto-incrementing primary key |
+| `sender_id` | `TEXT` | Telegram user ID of the sender |
+| `sender_username` | `TEXT` | Sender's @username (nullable) |
+| `message_text` | `TEXT` | Incoming message text |
+| `telegram_message_id` | `INTEGER` | Telegram's message ID |
+| `chat_id` | `INTEGER` | Telegram chat ID |
+| `received_at` | `TEXT` | ISO 8601 UTC timestamp |
+| `processed` | `INTEGER` | 0 = unprocessed, 1 = processed (for LLM pipeline) |
+
+Only messages from known recipients (present in `send_log` with `status='success'`) are logged here.
+
 ---
 
 ## Configuration Reference
@@ -774,6 +968,9 @@ MAX_DELAY_SECONDS=90
 
 # Database
 DB_PATH=data/send_log.db
+
+# Listener (optional)
+INCOMING_WEBHOOK_URL=
 ```
 
 ---
@@ -858,7 +1055,8 @@ tests/
 ├── conftest.py          # Shared fixtures
 ├── test_send.py         # POST /send endpoint tests
 ├── test_health.py       # GET /health endpoint tests
-└── test_rate_limiter.py # Rate limiter unit tests
+├── test_rate_limiter.py # Rate limiter unit tests
+└── test_listener.py     # Incoming listener unit + endpoint tests
 ```
 
 ### Key Fixtures (`conftest.py`)
@@ -867,7 +1065,8 @@ tests/
 |---------|-------|-------------|
 | `test_settings` | function | `Settings` with zero delays, 5 msg/day quota, temp DB |
 | `mock_send_message` | function | `AsyncMock(return_value=42)` replacing Telethon send |
-| `db` | function | Initializes and tears down test SQLite database |
+| `db` | function | Initializes and tears down test SQLite database (rate_limiter) |
+| `listener_db` | function | Initializes and tears down listener's SQLite database |
 | `worker` | function | Starts and stops the rate limiter worker |
 | `client` | function | Full `AsyncClient` with mocked Telethon and test settings |
 
@@ -896,6 +1095,18 @@ The `client` fixture patches `telethon_client` module functions with mocks, over
 - Quota availability check
 - Worker processes queue items and handles errors
 
+**`test_listener.py`** (10 tests):
+- DB schema creation (`incoming_log` table)
+- Log incoming writes record
+- Limit and order (newest first)
+- Unprocessed-only filter
+- Mark processed
+- Known recipient by user_id
+- Known recipient by @username
+- Graceful fallback when DB not initialized
+- Callback mechanism (add/remove/dispatch)
+- `GET /incoming` endpoint returns empty list
+
 ### Dependencies
 
 | Package | Version | Purpose |
@@ -906,6 +1117,6 @@ The `client` fixture patches `telethon_client` module functions with mocks, over
 | `pydantic-settings` | `>=2.7,<3` | Environment config loading |
 | `aiosqlite` | `>=0.21,<1` | Async SQLite |
 | `python-dotenv` | `>=1.0,<2` | `.env` file loading |
+| `httpx` | `>=0.28,<1` | Async HTTP client (webhook forwarding + tests) |
 | `pytest` | `>=8.0,<9` | Test framework (dev) |
 | `pytest-asyncio` | `>=0.25,<1` | Async test support (dev) |
-| `httpx` | `>=0.28,<1` | Async HTTP test client (dev) |
