@@ -139,6 +139,18 @@ async def get_incoming(
     return IncomingListResponse(ok=True, messages=messages, count=len(messages))
 
 
+@app.post("/incoming/{incoming_id}/processed")
+async def post_mark_processed(
+    incoming_id: int,
+    _api_key: str = Depends(verify_api_key),
+) -> dict:
+    try:
+        await listener.mark_processed(incoming_id)
+        return {"ok": True}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.post("/auth/send-code", response_model=SendCodeResponse)
 async def post_auth_send_code(
     body: SendCodeRequest,

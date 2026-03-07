@@ -25,6 +25,8 @@ _qr_login = None  # active QR login token
 
 async def start_client(settings: Settings) -> None:
     global _client
+    # Suppress noisy PersistentTimestampOutdatedError from Telethon internals
+    logging.getLogger("telethon").setLevel(logging.ERROR)
     _client = TelegramClient(
         settings.telegram_session_name,
         settings.telegram_api_id,
