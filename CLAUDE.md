@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Telethon-Evgenia is a Telegram user-bot HTTP server for automated lead outreach. It receives qualified leads via HTTP from an n8n orchestrator and sends personalized first-contact messages through a real Telegram account using Telethon (MTProto).
+Telethon-Evgenia is a multi-account Telegram user-bot HTTP server for automated lead outreach. It receives qualified leads via HTTP from an n8n orchestrator and sends personalized first-contact messages through real Telegram accounts using Telethon (MTProto). Multiple accounts can run simultaneously in one server instance.
 
 The full specification lives in `ai_docs/project-core.md` (in Russian).
 
@@ -12,46 +12,77 @@ The full specification lives in `ai_docs/project-core.md` (in Russian).
 
 ```
 n8n (external orchestrator)
-  → HTTP POST /send
+  → HTTP POST /accounts/{account_id}/send
     → FastAPI server (this project)
-      → Rate limiter (queue + daily quota + random delays)
-        → Telethon client (MTProto user-bot)
-          → Telegram
+      → AccountManager (per-account state)
+        → Rate limiter (queue + daily quota + random delays)
+          → Telethon client (MTProto user-bot)
+            → Telegram
 ```
 
-Key design constraint: this uses a **user-bot** (Telethon), not the Bot API, because the use case requires initiating conversations with users who haven't interacted first. This brings ban risk, so rate limiting and delay randomization are critical.
+Key design constraint: this uses **user-bots** (Telethon), not the Bot API, because the use case requires initiating conversations with users who haven't interacted first. This brings ban risk, so rate limiting and delay randomization are critical.
 
 ## Tech Stack
 
 - Python 3.11+, FastAPI, Telethon, uvicorn
-- Configuration via `.env` (see `ai_docs/project-core.md` for all env vars)
+- SQLite via aiosqlite (single DB file: `data/send_log.db`)
+- Configuration via `.env` (see `.env.example`)
 - Deployment via Docker
 
-## Planned Project Structure
+## Project Structure
 
 ```
 app/
 ├── main.py              # FastAPI app, lifespan, route definitions
-├── telethon_client.py   # Telethon session management & message sending
-├── rate_limiter.py      # Daily quota, message queue, random delays (30-90s)
-├── listener.py          # Incoming message listener (lead replies)
+├── account_manager.py   # Central per-account state (clients, queues, workers, DB ops)
+├── telethon_client.py   # Pure factory functions for Telethon (no module-level state)
+├── listener.py          # Incoming message listener (parameterized, no globals)
 ├── config.py            # .env loading via Pydantic settings
-└── auth.py              # API key verification (protects endpoints from unauthorized access)
+├── auth.py              # API key verification (X-API-Key header)
+└── auth_session.py      # CLI script for interactive session authorization
 ```
+
+## Database
+
+Single SQLite file with three tables:
+- `accounts` — registered Telegram accounts with credentials, status, rate limits
+- `send_log` — all outgoing message attempts (scoped by `account_id`)
+- `incoming_log` — incoming messages from known leads (scoped by `account_id`)
+
+Session files stored in `data/sessions/`.
 
 ## API Endpoints
 
-- **POST /send** — send message to a recipient (by `@username` or numeric `user_id`). Returns `{ ok, message_id }` or `{ ok: false, error }`.
-- **GET /health** — server liveness + Telethon session status.
-- **GET /incoming** — retrieve logged incoming messages from known leads. Query params: `limit`, `unprocessed_only`.
+### Account Management
+- **POST /accounts** — create account (api_id, api_hash, rate limits)
+- **GET /accounts** — list all accounts + statuses + today_sent count
+- **GET /accounts/{account_id}** — single account details
+- **PATCH /accounts/{account_id}** — update rate limits
+- **DELETE /accounts/{account_id}** — stop + delete account
 
-All endpoints are protected by API key auth.
+### Per-Account Operations
+- **POST /accounts/{account_id}/send** — enqueue message
+- **GET /accounts/{account_id}/health** — auth status of this account
+- **GET /accounts/{account_id}/incoming** — incoming messages for this account
+- **POST /accounts/{account_id}/incoming/{id}/processed** — mark as processed
+- **POST /accounts/{account_id}/auth/send-code** — send login code
+- **POST /accounts/{account_id}/auth/verify** — verify code
+- **POST /accounts/{account_id}/auth/qr** — generate QR login URL
+- **POST /accounts/{account_id}/auth/qr/wait** — wait for QR scan
+- **POST /accounts/{account_id}/auth/qr/password** — submit 2FA after QR
+
+### Aggregated
+- **GET /health** — server status + all accounts summary
+- **GET /incoming** — incoming across all accounts
+
+All endpoints protected by single `X-API-Key`.
 
 ## Rate Limiting Defaults
 
 - `MAX_MESSAGES_PER_DAY = 25`
 - `MIN_DELAY_SECONDS = 30`, `MAX_DELAY_SECONDS = 90` (random delay between sends)
 - Hard daily cutoff — server refuses sends after quota is reached until next day
+- Each account has independent rate limits (configurable at creation or via PATCH)
 
 ## Code Conventions
 

@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ app/
 
-RUN mkdir -p data
+RUN mkdir -p data/sessions
 
 EXPOSE 8000
 

@@ -6,7 +6,6 @@ services:
       - "${PORT:-8000}:8000"
     volumes:
       - ./data:/app/data
-      - ./${TELEGRAM_SESSION_NAME:-evgenia}.session:/app/${TELEGRAM_SESSION_NAME:-evgenia}.session
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/docs')"]
       interval: 30s

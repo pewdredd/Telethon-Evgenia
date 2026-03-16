@@ -1,25 +1,21 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
+from app.account_manager import AccountManager
 from app.config import Settings, get_settings
-from app.listener import close_db as listener_close_db
-from app.listener import init_db as listener_init_db
-from app.rate_limiter import close_db, init_db, start_worker, stop_worker
 
 
 def get_test_settings(tmp_path) -> Settings:
     return Settings(
-        telegram_api_id=0,
-        telegram_api_hash="test",
-        telegram_session_name="test",
         api_key="test-key",
         max_messages_per_day=5,
         min_delay_seconds=0,
         max_delay_seconds=0,
         db_path=str(tmp_path / "test.db"),
+        sessions_dir=str(tmp_path / "sessions"),
     )
 
 
@@ -34,63 +30,59 @@ def mock_send_message() -> AsyncMock:
 
 
 @pytest_asyncio.fixture
-async def db(test_settings):
-    await init_db(test_settings.db_path)
-    yield
-    await close_db()
+async def manager(test_settings):
+    mgr = AccountManager(test_settings)
+    await mgr.init_db()
+    yield mgr
+    await mgr.shutdown_all()
 
 
-@pytest_asyncio.fixture
-async def listener_db(test_settings):
-    await listener_init_db(test_settings.db_path)
-    yield
-    await listener_close_db()
-
-
-@pytest_asyncio.fixture
-async def worker(db, mock_send_message, test_settings):
-    start_worker(mock_send_message, test_settings)
-    yield mock_send_message
-    await stop_worker()
+TEST_ACCOUNT_ID = "test-account"
 
 
 @pytest_asyncio.fixture
 async def client(tmp_path, mock_send_message):
     settings = get_test_settings(tmp_path)
 
-    import app.telethon_client as tc_mod
+    mock_client = MagicMock()
+    mock_client.connect = AsyncMock()
+    mock_client.disconnect = AsyncMock()
+    mock_client.is_connected = MagicMock(return_value=True)
+    mock_client.is_user_authorized = AsyncMock(return_value=True)
+    mock_client.get_me = AsyncMock(return_value=MagicMock(
+        id=12345, username="testuser", first_name="Test"
+    ))
+    mock_client.add_event_handler = MagicMock()
+    mock_client.remove_event_handler = MagicMock()
 
-    original_start = tc_mod.start_client
-    original_stop = tc_mod.stop_client
-    original_get_me = tc_mod.get_me
-    original_send = tc_mod.send_message
+    from app.main import app, get_manager
 
-    tc_mod.start_client = AsyncMock()
-    tc_mod.stop_client = AsyncMock()
-    tc_mod.get_me = AsyncMock(return_value={"id": 12345, "username": "testuser"})
-    tc_mod.send_message = mock_send_message
+    mgr = AccountManager(settings)
+    await mgr.init_db()
 
-    from app.main import app
+    with patch("app.telethon_client.create_client", return_value=mock_client), \
+         patch("app.telethon_client.send_message", mock_send_message), \
+         patch("app.telethon_client.get_me", AsyncMock(return_value={"id": 12345, "username": "testuser"})):
 
-    app.dependency_overrides[get_settings] = lambda: settings
+        # Create a test account directly in DB + start it
+        await mgr.add_account(
+            account_id=TEST_ACCOUNT_ID,
+            api_id=0,
+            api_hash="test",
+            max_messages_per_day=5,
+            min_delay_seconds=0,
+            max_delay_seconds=0,
+        )
+        await mgr.mark_authorized(TEST_ACCOUNT_ID, 12345, "testuser")
 
-    # ASGITransport doesn't run lifespan, so init manually
-    await init_db(settings.db_path)
-    start_worker(mock_send_message, settings)
-    await listener_init_db(settings.db_path)
+        app.dependency_overrides[get_settings] = lambda: settings
+        app.dependency_overrides[get_manager] = lambda: mgr
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as ac:
-        yield ac
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as ac:
+            yield ac
 
-    await listener_close_db()
-    await stop_worker()
-    await close_db()
-
+    await mgr.shutdown_all()
     app.dependency_overrides.clear()
-    tc_mod.start_client = original_start
-    tc_mod.stop_client = original_stop
-    tc_mod.get_me = original_get_me
-    tc_mod.send_message = original_send

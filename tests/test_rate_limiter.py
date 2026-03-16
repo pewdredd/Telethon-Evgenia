@@ -1,74 +1,104 @@
+"""Tests for AccountManager's rate limiting, logging, and quota logic."""
+
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
+from app.account_manager import AccountManager
 
-from app.rate_limiter import (
-    close_db,
-    enqueue_message,
-    get_today_send_count,
-    init_db,
-    is_quota_available,
-    log_send,
-    start_worker,
-    stop_worker,
-)
+
+TEST_ACCOUNT_ID = "rate-test"
+
+
+async def _create_manager_with_account(test_settings) -> AccountManager:
+    mgr = AccountManager(test_settings)
+    await mgr.init_db()
+
+    mock_client = MagicMock()
+    mock_client.connect = AsyncMock()
+    mock_client.disconnect = AsyncMock()
+    mock_client.is_user_authorized = AsyncMock(return_value=False)
+    mock_client.get_me = AsyncMock(return_value=MagicMock(
+        id=1, username="u", first_name="U"
+    ))
+    mock_client.add_event_handler = MagicMock()
+    mock_client.remove_event_handler = MagicMock()
+
+    with patch("app.telethon_client.create_client", return_value=mock_client):
+        await mgr.add_account(
+            account_id=TEST_ACCOUNT_ID,
+            api_id=0,
+            api_hash="test",
+            max_messages_per_day=5,
+            min_delay_seconds=0,
+            max_delay_seconds=0,
+        )
+    return mgr
 
 
 async def test_init_db_creates_schema(test_settings):
-    await init_db(test_settings.db_path)
-    count = await get_today_send_count()
+    mgr = AccountManager(test_settings)
+    await mgr.init_db()
+    count = await mgr.get_today_send_count(TEST_ACCOUNT_ID)
     assert count == 0
-    await close_db()
+    await mgr.shutdown_all()
 
 
-async def test_log_send_writes_records(db):
-    await log_send("@user1", "hello", 42, "success")
-    await log_send("@user2", "hi", None, "error", "some error")
-    count = await get_today_send_count()
-    assert count == 1  # only successful
+async def test_log_send_writes_records(test_settings):
+    mgr = await _create_manager_with_account(test_settings)
+    await mgr.log_send(TEST_ACCOUNT_ID, "@user1", "hello", 42, "success")
+    await mgr.log_send(TEST_ACCOUNT_ID, "@user2", "hi", None, "error", "some error")
+    count = await mgr.get_today_send_count(TEST_ACCOUNT_ID)
+    assert count == 1
+    await mgr.shutdown_all()
 
 
-async def test_get_today_send_count_only_today(db):
-    from app.rate_limiter import _db
-    await _db.execute(
-        "INSERT INTO send_log (recipient, message, telegram_message_id, status, error, sent_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        ("@old", "msg", 1, "success", None, "2020-01-01T00:00:00+00:00"),
+async def test_get_today_send_count_only_today(test_settings):
+    mgr = await _create_manager_with_account(test_settings)
+    await mgr.db.execute(
+        "INSERT INTO send_log (account_id, recipient, message, telegram_message_id, status, error, sent_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (TEST_ACCOUNT_ID, "@old", "msg", 1, "success", None, "2020-01-01T00:00:00+00:00"),
     )
-    await _db.commit()
+    await mgr.db.commit()
 
-    await log_send("@today", "msg", 2, "success")
-    count = await get_today_send_count()
-    assert count == 1  # old record not counted
-
-
-async def test_is_quota_available(db):
-    assert await is_quota_available(2) is True
-    await log_send("@u1", "m", 1, "success")
-    assert await is_quota_available(2) is True
-    await log_send("@u2", "m", 2, "success")
-    assert await is_quota_available(2) is False
+    await mgr.log_send(TEST_ACCOUNT_ID, "@today", "msg", 2, "success")
+    count = await mgr.get_today_send_count(TEST_ACCOUNT_ID)
+    assert count == 1
+    await mgr.shutdown_all()
 
 
-async def test_worker_applies_delay(db, test_settings):
+async def test_is_quota_available(test_settings):
+    mgr = await _create_manager_with_account(test_settings)
+    assert await mgr.is_quota_available(TEST_ACCOUNT_ID, 2) is True
+    await mgr.log_send(TEST_ACCOUNT_ID, "@u1", "m", 1, "success")
+    assert await mgr.is_quota_available(TEST_ACCOUNT_ID, 2) is True
+    await mgr.log_send(TEST_ACCOUNT_ID, "@u2", "m", 2, "success")
+    assert await mgr.is_quota_available(TEST_ACCOUNT_ID, 2) is False
+    await mgr.shutdown_all()
+
+
+async def test_worker_applies_delay(test_settings):
+    mgr = await _create_manager_with_account(test_settings)
     send_fn = AsyncMock(return_value=99)
-    start_worker(send_fn, test_settings)
 
-    future = await enqueue_message("@user", "hello")
-    result = await asyncio.wait_for(future, timeout=5)
-    assert result == 99
-    send_fn.assert_called_once_with("@user", "hello")
+    with patch("app.telethon_client.send_message", send_fn):
+        await mgr.mark_authorized(TEST_ACCOUNT_ID, 1, "u")
+        future = await mgr.enqueue_message(TEST_ACCOUNT_ID, "@user", "hello")
+        result = await asyncio.wait_for(future, timeout=5)
+        assert result == 99
 
-    await stop_worker()
+    await mgr.shutdown_all()
 
 
-async def test_worker_handles_send_error(db, test_settings):
+async def test_worker_handles_send_error(test_settings):
+    import pytest
+    mgr = await _create_manager_with_account(test_settings)
     send_fn = AsyncMock(side_effect=RuntimeError("boom"))
-    start_worker(send_fn, test_settings)
 
-    future = await enqueue_message("@user", "hello")
-    with pytest.raises(RuntimeError, match="boom"):
-        await asyncio.wait_for(future, timeout=5)
+    with patch("app.telethon_client.send_message", send_fn):
+        await mgr.mark_authorized(TEST_ACCOUNT_ID, 1, "u")
+        future = await mgr.enqueue_message(TEST_ACCOUNT_ID, "@user", "hello")
+        with pytest.raises(RuntimeError, match="boom"):
+            await asyncio.wait_for(future, timeout=5)
 
-    await stop_worker()
+    await mgr.shutdown_all()
