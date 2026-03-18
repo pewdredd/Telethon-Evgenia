@@ -53,7 +53,7 @@ class UpdateAccountRequest(BaseModel):
 
 
 class SendRequest(BaseModel):
-    recipient: str = Field(..., min_length=1)
+    recipient: str | int
     message: str = Field(..., min_length=1)
 
 
@@ -228,7 +228,7 @@ async def post_send(
         raise HTTPException(status_code=429, detail="Daily message quota exhausted")
 
     recipient: str | int = body.recipient
-    if body.recipient.isdigit():
+    if isinstance(body.recipient, str) and body.recipient.isdigit():
         recipient = int(body.recipient)
 
     future = await manager.enqueue_message(account_id, recipient, body.message)
