@@ -13,6 +13,7 @@ from telethon.errors import (
     SessionPasswordNeededError,
     UserPrivacyRestrictedError,
 )
+from telethon.tl.types import InputPeerUser
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +50,14 @@ async def send_message(client: TelegramClient, recipient: str | int, message: st
     """Send a message and return (message_id, user_id)."""
     if not await client.is_user_authorized():
         raise RuntimeError("Telethon session is not authorized")
+    target = recipient
+    if isinstance(recipient, int):
+        try:
+            target = await client.get_input_entity(recipient)
+        except ValueError:
+            target = InputPeerUser(recipient, access_hash=0)
     try:
-        result = await client.send_message(recipient, message)
+        result = await client.send_message(target, message)
         user_id = result.peer_id.user_id
         return result.id, user_id
     except PeerFloodError:
