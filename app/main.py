@@ -60,6 +60,7 @@ class SendRequest(BaseModel):
 class SendResponse(BaseModel):
     ok: bool
     message_id: int | None = None
+    user_id: int | None = None
     error: str | None = None
 
 
@@ -233,8 +234,8 @@ async def post_send(
 
     future = await manager.enqueue_message(account_id, recipient, body.message)
     try:
-        message_id = await future
-        return SendResponse(ok=True, message_id=message_id)
+        message_id, user_id = await future
+        return SendResponse(ok=True, message_id=message_id, user_id=user_id)
     except Exception as exc:
         return SendResponse(ok=False, error=str(exc))
 

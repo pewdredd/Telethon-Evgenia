@@ -45,13 +45,14 @@ async def get_me(client: TelegramClient) -> dict | None:
         return None
 
 
-async def send_message(client: TelegramClient, recipient: str | int, message: str) -> int:
-    """Send a message and return the Telegram message ID."""
+async def send_message(client: TelegramClient, recipient: str | int, message: str) -> tuple[int, int]:
+    """Send a message and return (message_id, user_id)."""
     if not await client.is_user_authorized():
         raise RuntimeError("Telethon session is not authorized")
     try:
         result = await client.send_message(recipient, message)
-        return result.id
+        user_id = result.peer_id.user_id
+        return result.id, user_id
     except PeerFloodError:
         raise RuntimeError("Telegram PeerFloodError: too many messages sent, try again later")
     except UserPrivacyRestrictedError:

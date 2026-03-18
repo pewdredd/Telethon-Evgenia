@@ -386,14 +386,14 @@ class AccountManager:
                     )
                     continue
 
-                message_id = await telethon_client.send_message(
+                message_id, user_id = await telethon_client.send_message(
                     state.client, item.recipient, item.message
                 )
                 await self.log_send(
                     state.account_id, str(item.recipient), item.message,
                     message_id, "success"
                 )
-                item.future.set_result(message_id)
+                item.future.set_result((message_id, user_id))
             except Exception as exc:
                 error_msg = str(exc)
                 await self.log_send(
@@ -405,9 +405,9 @@ class AccountManager:
             finally:
                 state.queue.task_done()
 
-    async def enqueue_message(self, account_id: str, recipient: str | int, message: str) -> asyncio.Future[int]:
+    async def enqueue_message(self, account_id: str, recipient: str | int, message: str) -> asyncio.Future[tuple[int, int]]:
         state = self.get_account(account_id)
-        future: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+        future: asyncio.Future[tuple[int, int]] = asyncio.get_running_loop().create_future()
         await state.queue.put(_QueueItem(recipient=recipient, message=message, future=future))
         return future
 
