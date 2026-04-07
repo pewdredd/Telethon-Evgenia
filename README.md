@@ -70,6 +70,17 @@ curl -X POST http://localhost:8000/accounts \
 
 Если лимиты не указаны — берутся из `.env` (по умолчанию 25/30/90).
 
+По умолчанию каждый аккаунт слушает входящие от своих лидов и пересылает их в `INCOMING_WEBHOOK_URL`. Если клиент хочет отвечать вручную (без n8n-обработки), можно отключить пересылку прямо при создании:
+
+```json
+{
+  "account_id": "client-1",
+  "api_id": 12345,
+  "api_hash": "...",
+  "forward_incoming": false
+}
+```
+
 Статус нового аккаунта: `pending`. Он появится в системе, но отправлять сообщения не сможет, пока не пройдёт авторизацию.
 
 ### Шаг 2 — Авторизовать аккаунт
@@ -156,6 +167,14 @@ curl -X PATCH http://localhost:8000/accounts/client-1 \
   -H "Content-Type: application/json" \
   -d '{"max_messages_per_day": 50}'
 
+# Отключить пересылку входящих (клиент сам отвечает вручную)
+curl -X PATCH http://localhost:8000/accounts/client-1 \
+  -H "X-API-Key: your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"forward_incoming": false}'
+# Эффект мгновенный — listener снимается с живого клиента, рестарт не нужен.
+# Включить обратно: {"forward_incoming": true}
+
 # Удалить аккаунт (останавливает клиент и удаляет из БД)
 curl -X DELETE http://localhost:8000/accounts/client-1 \
   -H "X-API-Key: your-api-key"
@@ -210,6 +229,8 @@ curl "http://localhost:8000/accounts/client-1/incoming?limit=10&unprocessed_only
 ```
 
 Listener автоматически перехватывает ответы от лидов, которым уже писали (по `send_log`). Если задан `INCOMING_WEBHOOK_URL` — входящие также отправляются POST-запросом на указанный URL (для n8n).
+
+Listener можно отключить per-account флагом `forward_incoming = false` (см. раздел «Управление аккаунтами»). В этом случае сервер не подписывается на `NewMessage` для аккаунта, ничего не пишет в `incoming_log` и не дёргает webhook — клиент видит входящие только в своём Telegram и отвечает сам.
 
 ### GET /incoming — входящие по всем аккаунтам
 

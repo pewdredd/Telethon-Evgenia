@@ -45,19 +45,21 @@ app/
 ## Database
 
 Single SQLite file with three tables:
-- `accounts` — registered Telegram accounts with credentials, status, rate limits
+- `accounts` — registered Telegram accounts with credentials, status, rate limits, `forward_incoming` flag
 - `send_log` — all outgoing message attempts (scoped by `account_id`)
 - `incoming_log` — incoming messages from known leads (scoped by `account_id`)
+
+Schema migrations are handled via `ALTER TABLE … try/except aiosqlite.OperationalError` in `AccountManager.init_db()` — adds missing columns on existing DBs without breaking fresh installs.
 
 Session files stored in `data/sessions/`.
 
 ## API Endpoints
 
 ### Account Management
-- **POST /accounts** — create account (api_id, api_hash, rate limits)
+- **POST /accounts** — create account (api_id, api_hash, rate limits, `forward_incoming`)
 - **GET /accounts** — list all accounts + statuses + today_sent count
 - **GET /accounts/{account_id}** — single account details
-- **PATCH /accounts/{account_id}** — update rate limits
+- **PATCH /accounts/{account_id}** — update rate limits or `forward_incoming` (live toggle — listener registered/torn down without restart)
 - **DELETE /accounts/{account_id}** — stop + delete account
 
 ### Per-Account Operations
