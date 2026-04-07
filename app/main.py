@@ -44,12 +44,14 @@ class CreateAccountRequest(BaseModel):
     max_messages_per_day: int | None = None
     min_delay_seconds: int | None = None
     max_delay_seconds: int | None = None
+    forward_incoming: bool | None = None
 
 
 class UpdateAccountRequest(BaseModel):
     max_messages_per_day: int | None = None
     min_delay_seconds: int | None = None
     max_delay_seconds: int | None = None
+    forward_incoming: bool | None = None
 
 
 class SendRequest(BaseModel):
@@ -150,8 +152,11 @@ async def create_account(
             max_messages_per_day=body.max_messages_per_day,
             min_delay_seconds=body.min_delay_seconds,
             max_delay_seconds=body.max_delay_seconds,
+            forward_incoming=body.forward_incoming,
         )
         return {"ok": True, **result}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -191,6 +196,7 @@ async def update_account(
             max_messages_per_day=body.max_messages_per_day,
             min_delay_seconds=body.min_delay_seconds,
             max_delay_seconds=body.max_delay_seconds,
+            forward_incoming=body.forward_incoming,
         )
         return {"ok": True, **info}
     except KeyError:

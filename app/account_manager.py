@@ -50,6 +50,7 @@ class AccountState:
     max_messages_per_day: int
     min_delay_seconds: int
     max_delay_seconds: int
+    forward_incoming: bool = True
     qr_login: object | None = None
     listener_cleanup: object | None = None
 
@@ -67,6 +68,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     max_messages_per_day INTEGER NOT NULL DEFAULT 25,
     min_delay_seconds   INTEGER NOT NULL DEFAULT 30,
     max_delay_seconds   INTEGER NOT NULL DEFAULT 90,
+    forward_incoming    INTEGER NOT NULL DEFAULT 1,
     created_at          TEXT NOT NULL
 )
 """
@@ -129,22 +131,29 @@ class AccountManager:
         await self._db.execute(_CREATE_SEND_LOG_INDEX)
         await self._db.execute(_CREATE_INCOMING_LOG)
         await self._db.execute(_CREATE_INCOMING_LOG_INDEX)
+        # Migration: add forward_incoming column to accounts if missing
+        try:
+            await self._db.execute(
+                "ALTER TABLE accounts ADD COLUMN forward_incoming INTEGER NOT NULL DEFAULT 1"
+            )
+        except aiosqlite.OperationalError:
+            pass
         await self._db.commit()
 
     async def load_all(self) -> None:
         """Load all authorized accounts from DB and start their clients/workers."""
         async with self.db.execute(
             "SELECT account_id, api_id, api_hash, session_name, "
-            "max_messages_per_day, min_delay_seconds, max_delay_seconds "
+            "max_messages_per_day, min_delay_seconds, max_delay_seconds, forward_incoming "
             "FROM accounts WHERE status = 'authorized'"
         ) as cursor:
             rows = await cursor.fetchall()
 
         for row in rows:
-            account_id, api_id, api_hash, session_name, max_mpd, min_d, max_d = row
+            account_id, api_id, api_hash, session_name, max_mpd, min_d, max_d, fwd = row
             try:
                 await self._start_account(
-                    account_id, api_id, api_hash, session_name, max_mpd, min_d, max_d
+                    account_id, api_id, api_hash, session_name, max_mpd, min_d, max_d, bool(fwd)
                 )
                 logger.info("Loaded account %s", account_id)
             except Exception:
@@ -159,6 +168,7 @@ class AccountManager:
         max_messages_per_day: int,
         min_delay_seconds: int,
         max_delay_seconds: int,
+        forward_incoming: bool = True,
     ) -> AccountState:
         session_path = os.path.join(self._settings.sessions_dir, session_name)
         client = telethon_client.create_client(api_id, api_hash, session_path)
@@ -179,6 +189,7 @@ class AccountManager:
             max_messages_per_day=max_messages_per_day,
             min_delay_seconds=min_delay_seconds,
             max_delay_seconds=max_delay_seconds,
+            forward_incoming=forward_incoming,
         )
 
         # Start worker only if authorized
@@ -186,11 +197,12 @@ class AccountManager:
             state.worker_task = asyncio.create_task(
                 self._worker(state), name=f"worker-{account_id}"
             )
-            # Register listener
-            from app.listener import register_listener
-            state.listener_cleanup = register_listener(
-                account_id, client, self, self._settings.incoming_webhook_url
-            )
+            # Register listener only if forwarding is enabled
+            if forward_incoming:
+                from app.listener import register_listener
+                state.listener_cleanup = register_listener(
+                    account_id, client, self, self._settings.incoming_webhook_url
+                )
 
         self._accounts[account_id] = state
         return state
@@ -221,26 +233,33 @@ class AccountManager:
         max_messages_per_day: int | None = None,
         min_delay_seconds: int | None = None,
         max_delay_seconds: int | None = None,
+        forward_incoming: bool | None = None,
     ) -> dict:
         max_mpd = max_messages_per_day if max_messages_per_day is not None else self._settings.max_messages_per_day
         min_d = min_delay_seconds if min_delay_seconds is not None else self._settings.min_delay_seconds
         max_d = max_delay_seconds if max_delay_seconds is not None else self._settings.max_delay_seconds
+        fwd = True if forward_incoming is None else forward_incoming
 
         session_name = f"session_{account_id}"
         now = datetime.now(UTC).isoformat()
 
-        await self.db.execute(
-            "INSERT INTO accounts "
-            "(account_id, api_id, api_hash, phone, session_name, status, "
-            "max_messages_per_day, min_delay_seconds, max_delay_seconds, created_at) "
-            "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
-            (account_id, api_id, api_hash, phone, session_name, max_mpd, min_d, max_d, now),
-        )
-        await self.db.commit()
+        try:
+            await self.db.execute(
+                "INSERT INTO accounts "
+                "(account_id, api_id, api_hash, phone, session_name, status, "
+                "max_messages_per_day, min_delay_seconds, max_delay_seconds, "
+                "forward_incoming, created_at) "
+                "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
+                (account_id, api_id, api_hash, phone, session_name, max_mpd, min_d, max_d,
+                 1 if fwd else 0, now),
+            )
+            await self.db.commit()
+        except aiosqlite.IntegrityError:
+            raise ValueError(f"Account '{account_id}' already exists")
 
         # Start the client (pending status — not authorized yet, but ready for auth)
         state = await self._start_account(
-            account_id, api_id, api_hash, session_name, max_mpd, min_d, max_d
+            account_id, api_id, api_hash, session_name, max_mpd, min_d, max_d, fwd
         )
 
         return {
@@ -250,6 +269,7 @@ class AccountManager:
             "max_messages_per_day": max_mpd,
             "min_delay_seconds": min_d,
             "max_delay_seconds": max_d,
+            "forward_incoming": fwd,
             "created_at": now,
         }
 
@@ -264,6 +284,7 @@ class AccountManager:
         max_messages_per_day: int | None = None,
         min_delay_seconds: int | None = None,
         max_delay_seconds: int | None = None,
+        forward_incoming: bool | None = None,
     ) -> dict:
         # Fetch current
         async with self.db.execute(
@@ -274,7 +295,7 @@ class AccountManager:
             raise KeyError(f"Account {account_id} not found")
 
         updates = []
-        params = []
+        params: list = []
         if max_messages_per_day is not None:
             updates.append("max_messages_per_day = ?")
             params.append(max_messages_per_day)
@@ -284,6 +305,9 @@ class AccountManager:
         if max_delay_seconds is not None:
             updates.append("max_delay_seconds = ?")
             params.append(max_delay_seconds)
+        if forward_incoming is not None:
+            updates.append("forward_incoming = ?")
+            params.append(1 if forward_incoming else 0)
 
         if updates:
             params.append(account_id)
@@ -302,13 +326,29 @@ class AccountManager:
                     state.min_delay_seconds = min_delay_seconds
                 if max_delay_seconds is not None:
                     state.max_delay_seconds = max_delay_seconds
+                if forward_incoming is not None and forward_incoming != state.forward_incoming:
+                    state.forward_incoming = forward_incoming
+                    if forward_incoming:
+                        # False → True: register listener if account is running
+                        if state.worker_task is not None and state.listener_cleanup is None:
+                            from app.listener import register_listener
+                            state.listener_cleanup = register_listener(
+                                account_id, state.client, self,
+                                self._settings.incoming_webhook_url,
+                            )
+                    else:
+                        # True → False: tear down listener if registered
+                        if state.listener_cleanup is not None:
+                            state.listener_cleanup()
+                            state.listener_cleanup = None
 
         return await self.get_account_info(account_id)
 
     async def get_account_info(self, account_id: str) -> dict:
         async with self.db.execute(
             "SELECT account_id, api_id, phone, telegram_id, username, session_name, "
-            "status, max_messages_per_day, min_delay_seconds, max_delay_seconds, created_at "
+            "status, max_messages_per_day, min_delay_seconds, max_delay_seconds, "
+            "forward_incoming, created_at "
             "FROM accounts WHERE account_id = ?",
             (account_id,),
         ) as cursor:
@@ -328,7 +368,8 @@ class AccountManager:
             "max_messages_per_day": row[7],
             "min_delay_seconds": row[8],
             "max_delay_seconds": row[9],
-            "created_at": row[10],
+            "forward_incoming": bool(row[10]),
+            "created_at": row[11],
             "today_sent": today_sent,
         }
 
@@ -364,10 +405,11 @@ class AccountManager:
             state.worker_task = asyncio.create_task(
                 self._worker(state), name=f"worker-{account_id}"
             )
-            from app.listener import register_listener
-            state.listener_cleanup = register_listener(
-                account_id, state.client, self, self._settings.incoming_webhook_url
-            )
+            if state.forward_incoming:
+                from app.listener import register_listener
+                state.listener_cleanup = register_listener(
+                    account_id, state.client, self, self._settings.incoming_webhook_url
+                )
 
     # --- Worker loop ---
 
