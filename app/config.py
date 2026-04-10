@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # Listener
     incoming_webhook_url: str = ""
 
+    # Proxy for Telegram connections (e.g. http://user:pass@host:port)
+    https_proxy: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

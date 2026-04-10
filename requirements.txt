@@ -5,6 +5,7 @@ pydantic-settings>=2.7,<3
 aiosqlite>=0.21,<1
 python-dotenv>=1.0,<2
 httpx>=0.28,<1
+python-socks[asyncio]>=2.4,<3
 
 # dev
 pytest>=8.0,<9

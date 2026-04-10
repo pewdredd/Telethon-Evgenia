@@ -5,7 +5,9 @@ as parameter. Use ``create_client()`` to instantiate a new client.
 """
 
 import logging
+from urllib.parse import urlparse
 
+import python_socks
 from telethon import TelegramClient
 from telethon.errors import (
     FloodWaitError,
@@ -18,9 +20,29 @@ from telethon.tl.types import InputPeerUser
 logger = logging.getLogger(__name__)
 
 
-def create_client(api_id: int, api_hash: str, session_path: str) -> TelegramClient:
+def _parse_proxy(proxy_url: str) -> tuple | None:
+    """Parse proxy URL into a Telethon-compatible tuple."""
+    if not proxy_url:
+        return None
+    parsed = urlparse(proxy_url)
+    scheme = (parsed.scheme or "").lower().rstrip("s")  # https -> http
+    proxy_type = {
+        "http": python_socks.ProxyType.HTTP,
+        "socks5": python_socks.ProxyType.SOCKS5,
+        "socks4": python_socks.ProxyType.SOCKS4,
+    }.get(scheme)
+    if proxy_type is None:
+        logger.warning("Unknown proxy scheme %r, ignoring proxy", parsed.scheme)
+        return None
+    return (proxy_type, parsed.hostname, parsed.port, True, parsed.username, parsed.password)
+
+
+def create_client(
+    api_id: int, api_hash: str, session_path: str, proxy_url: str = ""
+) -> TelegramClient:
     """Create a new TelegramClient with hardcoded device emulation params."""
     logging.getLogger("telethon").setLevel(logging.ERROR)
+    proxy = _parse_proxy(proxy_url)
     return TelegramClient(
         session_path,
         api_id,
@@ -30,6 +52,7 @@ def create_client(api_id: int, api_hash: str, session_path: str) -> TelegramClie
         app_version="12.5",
         lang_code="ru",
         system_lang_code="ru",
+        proxy=proxy,
     )
 
 

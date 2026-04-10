@@ -171,7 +171,7 @@ class AccountManager:
         forward_incoming: bool = True,
     ) -> AccountState:
         session_path = os.path.join(self._settings.sessions_dir, session_name)
-        client = telethon_client.create_client(api_id, api_hash, session_path)
+        client = telethon_client.create_client(api_id, api_hash, session_path, self._settings.https_proxy)
         await client.connect()
 
         if await client.is_user_authorized():
