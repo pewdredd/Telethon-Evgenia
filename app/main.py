@@ -5,6 +5,7 @@ by account_id. Account management, auth, sending, and incoming message
 retrieval are all handled through per-account endpoints.
 """
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -15,6 +16,8 @@ from app.account_manager import AccountManager
 from app.auth import verify_api_key
 from app.config import Settings, get_settings
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -23,7 +26,27 @@ async def lifespan(app: FastAPI):
     await manager.init_db()
     await manager.load_all()
     app.state.manager = manager
+
+    # Start Telegram bot if token is configured
+    if settings.bot_token:
+        from app.bot import create_bot, start_polling, stop_polling
+
+        bot, dp = create_bot(settings, manager)
+        task = await start_polling(bot, dp)
+        app.state.bot = bot
+        app.state.dp = dp
+        app.state.bot_task = task
+    else:
+        logger.info("BOT_TOKEN not set — bot disabled")
+
     yield
+
+    # Stop bot if it was started
+    if hasattr(app.state, "bot"):
+        from app.bot import stop_polling
+
+        await stop_polling(app.state.bot, app.state.dp, app.state.bot_task)
+
     await manager.shutdown_all()
 
 

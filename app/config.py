@@ -6,6 +6,7 @@ See .env.example for a complete template.
 
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -39,6 +40,17 @@ class Settings(BaseSettings):
 
     # Proxy for Telegram connections (e.g. http://user:pass@host:port)
     https_proxy: str = ""
+
+    # Telegram bot for client self-registration
+    bot_token: str = ""
+    bot_admins: list[int] = []
+
+    @field_validator("bot_admins", mode="before")
+    @classmethod
+    def _parse_bot_admins(cls, v: object) -> list[int]:
+        if isinstance(v, str):
+            return [int(x.strip()) for x in v.split(",") if x.strip()]
+        return v  # type: ignore[return-value]
 
 
 @lru_cache

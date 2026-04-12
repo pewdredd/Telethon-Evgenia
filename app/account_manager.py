@@ -108,6 +108,14 @@ _CREATE_INCOMING_LOG_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_incoming_log_account ON incoming_log(account_id)
 """
 
+_CREATE_BOT_USERS = """
+CREATE TABLE IF NOT EXISTS bot_users (
+    telegram_id  INTEGER PRIMARY KEY,
+    added_by     INTEGER NOT NULL,
+    added_at     TEXT NOT NULL
+)
+"""
+
 
 class AccountManager:
     def __init__(self, settings: Settings) -> None:
@@ -131,6 +139,7 @@ class AccountManager:
         await self._db.execute(_CREATE_SEND_LOG_INDEX)
         await self._db.execute(_CREATE_INCOMING_LOG)
         await self._db.execute(_CREATE_INCOMING_LOG_INDEX)
+        await self._db.execute(_CREATE_BOT_USERS)
         # Migration: add forward_incoming column to accounts if missing
         try:
             await self._db.execute(
@@ -483,6 +492,15 @@ class AccountManager:
             row = await cursor.fetchone()
             return row[0] if row else 0
 
+    async def get_total_send_count(self, account_id: str) -> int:
+        async with self.db.execute(
+            "SELECT COUNT(*) FROM send_log "
+            "WHERE account_id = ? AND status = 'success'",
+            (account_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
     async def is_quota_available(self, account_id: str, max_per_day: int) -> bool:
         return await self.get_today_send_count(account_id) < max_per_day
 
@@ -580,6 +598,37 @@ class AccountManager:
         except Exception:
             logger.exception("Error checking known recipient")
             return False
+
+    # --- Bot users ---
+
+    async def add_bot_user(self, telegram_id: int, added_by: int) -> None:
+        await self.db.execute(
+            "INSERT OR IGNORE INTO bot_users (telegram_id, added_by, added_at) VALUES (?, ?, ?)",
+            [telegram_id, added_by, datetime.now(UTC).isoformat()],
+        )
+        await self.db.commit()
+
+    async def remove_bot_user(self, telegram_id: int) -> bool:
+        cursor = await self.db.execute(
+            "DELETE FROM bot_users WHERE telegram_id = ?", [telegram_id]
+        )
+        await self.db.commit()
+        return cursor.rowcount > 0
+
+    async def list_bot_users(self) -> list[dict]:
+        async with self.db.execute(
+            "SELECT telegram_id, added_by, added_at FROM bot_users ORDER BY added_at"
+        ) as cursor:
+            return [
+                {"telegram_id": r[0], "added_by": r[1], "added_at": r[2]}
+                for r in await cursor.fetchall()
+            ]
+
+    async def is_bot_user(self, telegram_id: int) -> bool:
+        async with self.db.execute(
+            "SELECT 1 FROM bot_users WHERE telegram_id = ?", [telegram_id]
+        ) as cursor:
+            return await cursor.fetchone() is not None
 
     # --- Shutdown ---
 
