@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     def _parse_bot_admins(cls, v: object) -> list[int]:
         if isinstance(v, str):
             return [int(x.strip()) for x in v.split(",") if x.strip()]
+        if isinstance(v, int):
+            return [v]
         return v  # type: ignore[return-value]
 
 
