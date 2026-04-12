@@ -24,8 +24,8 @@ router = Router(name="admin")
 async def cmd_start(message: Message) -> None:
     await message.answer(
         "Привет, админ! Доступные команды:\n"
-        "/add_user <telegram_id> — добавить пользователя\n"
-        "/remove_user <telegram_id> — удалить пользователя\n"
+        "/add_user <id или @username> — добавить пользователя\n"
+        "/remove_user <id или @username> — удалить пользователя\n"
         "/users — список пользователей\n"
         "/accounts — список аккаунтов"
     )
@@ -48,17 +48,21 @@ async def cmd_add_user(
     message: Message, command: CommandObject, manager: AccountManager
 ) -> None:
     if not command.args:
-        await message.answer("Использование: /add_user <telegram_id>")
+        await message.answer("Использование: /add_user <id или @username>")
         return
 
+    arg = command.args.strip()
     try:
-        telegram_id = int(command.args.strip())
+        telegram_id = int(arg)
+        await manager.add_bot_user(added_by=message.from_user.id, telegram_id=telegram_id)
+        await message.answer(f"Пользователь {telegram_id} добавлен.")
     except ValueError:
-        await message.answer("telegram_id должен быть числом.")
-        return
-
-    await manager.add_bot_user(telegram_id, added_by=message.from_user.id)
-    await message.answer(f"Пользователь {telegram_id} добавлен.")
+        username = arg.lstrip("@")
+        await manager.add_bot_user(added_by=message.from_user.id, username=username)
+        await message.answer(
+            f"Пользователь @{username} добавлен.\n"
+            "Telegram ID привяжется когда он напишет /start боту."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -70,20 +74,15 @@ async def cmd_remove_user(
     message: Message, command: CommandObject, manager: AccountManager
 ) -> None:
     if not command.args:
-        await message.answer("Использование: /remove_user <telegram_id>")
+        await message.answer("Использование: /remove_user <id или @username>")
         return
 
-    try:
-        telegram_id = int(command.args.strip())
-    except ValueError:
-        await message.answer("telegram_id должен быть числом.")
-        return
-
-    removed = await manager.remove_bot_user(telegram_id)
+    arg = command.args.strip()
+    removed = await manager.remove_bot_user(arg)
     if removed:
-        await message.answer(f"Пользователь {telegram_id} удалён.")
+        await message.answer(f"Пользователь {arg} удалён.")
     else:
-        await message.answer(f"Пользователь {telegram_id} не найден.")
+        await message.answer(f"Пользователь {arg} не найден.")
 
 
 # ---------------------------------------------------------------------------
@@ -108,12 +107,18 @@ async def cmd_users(message: Message, manager: AccountManager) -> None:
     lines: list[str] = []
     for i, user in enumerate(bot_users, 1):
         tg_id = user["telegram_id"]
-        account_id = tg_to_account.get(tg_id)
+        uname = user.get("username")
+        label = f"@{uname}" if uname else str(tg_id) if tg_id else "?"
+        if tg_id and uname:
+            label = f"@{uname} ({tg_id})"
+        account_id = tg_to_account.get(tg_id) if tg_id else None
         if account_id:
             status = f"зарегистрирован ({account_id})"
-        else:
+        elif tg_id:
             status = "не зарегистрирован"
-        lines.append(f"{i}. {tg_id} — {status}")
+        else:
+            status = "ожидает /start"
+        lines.append(f"{i}. {label} — {status}")
 
     await message.answer("Пользователи:\n\n" + "\n".join(lines))
 

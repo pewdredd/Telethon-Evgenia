@@ -30,7 +30,7 @@ class WhitelistMiddleware(BaseMiddleware):
         if user is None:
             return await handler(event, data)
 
-        if user.id in bot_admins or await manager.is_bot_user(user.id):
+        if user.id in bot_admins or await manager.is_bot_user(user.id, user.username):
             return await handler(event, data)
 
         # Reject: send message if possible

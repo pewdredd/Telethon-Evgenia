@@ -41,6 +41,9 @@ MAX_2FA_ATTEMPTS = 3
 async def cmd_start_registration(
     message: Message, state: FSMContext, manager: AccountManager
 ) -> None:
+    # Link telegram_id to a user previously added by username
+    await manager.resolve_bot_user(message.from_user.id, message.from_user.username)
+
     account_id = str(message.from_user.id)
 
     try:

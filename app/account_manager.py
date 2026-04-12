@@ -110,7 +110,9 @@ CREATE INDEX IF NOT EXISTS idx_incoming_log_account ON incoming_log(account_id)
 
 _CREATE_BOT_USERS = """
 CREATE TABLE IF NOT EXISTS bot_users (
-    telegram_id  INTEGER PRIMARY KEY,
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id  INTEGER,
+    username     TEXT,
     added_by     INTEGER NOT NULL,
     added_at     TEXT NOT NULL
 )
@@ -147,6 +149,23 @@ class AccountManager:
             )
         except aiosqlite.OperationalError:
             pass
+        # Migration: bot_users PK change — old schema had telegram_id as PK.
+        async with self._db.execute("PRAGMA table_info(bot_users)") as cur:
+            columns = {row[1] for row in await cur.fetchall()}
+        if "id" not in columns:
+            await self._db.execute("ALTER TABLE bot_users RENAME TO _bot_users_old")
+            await self._db.execute(_CREATE_BOT_USERS)
+            await self._db.execute(
+                "INSERT INTO bot_users (telegram_id, username, added_by, added_at) "
+                "SELECT telegram_id, NULL, added_by, added_at FROM _bot_users_old"
+            )
+            await self._db.execute("DROP TABLE _bot_users_old")
+        else:
+            # Migration: add username column if missing (fresh schema already has it)
+            try:
+                await self._db.execute("ALTER TABLE bot_users ADD COLUMN username TEXT")
+            except aiosqlite.OperationalError:
+                pass
         await self._db.commit()
 
     async def load_all(self) -> None:
@@ -601,34 +620,89 @@ class AccountManager:
 
     # --- Bot users ---
 
-    async def add_bot_user(self, telegram_id: int, added_by: int) -> None:
+    async def add_bot_user(
+        self,
+        added_by: int,
+        telegram_id: int | None = None,
+        username: str | None = None,
+    ) -> None:
+        if username:
+            username = username.lstrip("@").lower()
+        # Avoid duplicates: check existing entry by telegram_id or username
+        if telegram_id:
+            async with self.db.execute(
+                "SELECT 1 FROM bot_users WHERE telegram_id = ?", [telegram_id]
+            ) as cur:
+                if await cur.fetchone():
+                    return
+        if username:
+            async with self.db.execute(
+                "SELECT 1 FROM bot_users WHERE username = ?", [username]
+            ) as cur:
+                if await cur.fetchone():
+                    return
         await self.db.execute(
-            "INSERT OR IGNORE INTO bot_users (telegram_id, added_by, added_at) VALUES (?, ?, ?)",
-            [telegram_id, added_by, datetime.now(UTC).isoformat()],
+            "INSERT INTO bot_users (telegram_id, username, added_by, added_at) "
+            "VALUES (?, ?, ?, ?)",
+            [telegram_id, username, added_by, datetime.now(UTC).isoformat()],
         )
         await self.db.commit()
 
-    async def remove_bot_user(self, telegram_id: int) -> bool:
-        cursor = await self.db.execute(
-            "DELETE FROM bot_users WHERE telegram_id = ?", [telegram_id]
-        )
+    async def remove_bot_user(self, identifier: str) -> bool:
+        """Remove by numeric telegram_id or username."""
+        try:
+            tid = int(identifier)
+            cursor = await self.db.execute(
+                "DELETE FROM bot_users WHERE telegram_id = ?", [tid]
+            )
+        except ValueError:
+            clean = identifier.lstrip("@").lower()
+            cursor = await self.db.execute(
+                "DELETE FROM bot_users WHERE username = ?", [clean]
+            )
         await self.db.commit()
         return cursor.rowcount > 0
 
     async def list_bot_users(self) -> list[dict]:
         async with self.db.execute(
-            "SELECT telegram_id, added_by, added_at FROM bot_users ORDER BY added_at"
+            "SELECT telegram_id, username, added_by, added_at FROM bot_users ORDER BY added_at"
         ) as cursor:
             return [
-                {"telegram_id": r[0], "added_by": r[1], "added_at": r[2]}
+                {"telegram_id": r[0], "username": r[1], "added_by": r[2], "added_at": r[3]}
                 for r in await cursor.fetchall()
             ]
 
-    async def is_bot_user(self, telegram_id: int) -> bool:
+    async def is_bot_user(self, telegram_id: int, username: str | None = None) -> bool:
         async with self.db.execute(
             "SELECT 1 FROM bot_users WHERE telegram_id = ?", [telegram_id]
         ) as cursor:
-            return await cursor.fetchone() is not None
+            if await cursor.fetchone():
+                return True
+        if username:
+            clean = username.lstrip("@").lower()
+            async with self.db.execute(
+                "SELECT 1 FROM bot_users WHERE username = ?", [clean]
+            ) as cursor:
+                return await cursor.fetchone() is not None
+        return False
+
+    async def resolve_bot_user(self, telegram_id: int, username: str | None) -> None:
+        """Link telegram_id to a user previously added by username."""
+        if not username:
+            return
+        clean = username.lstrip("@").lower()
+        # Find entry with matching username but no telegram_id
+        async with self.db.execute(
+            "SELECT id FROM bot_users WHERE username = ? AND telegram_id IS NULL",
+            [clean],
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row:
+            await self.db.execute(
+                "UPDATE bot_users SET telegram_id = ? WHERE id = ?",
+                [telegram_id, row[0]],
+            )
+            await self.db.commit()
 
     # --- Shutdown ---
 
