@@ -67,17 +67,11 @@ async def cmd_start_registration(
         phone = info.get("phone") or "—"
         masked = mask_phone(phone) if phone != "—" else "—"
         username = info.get("username") or "—"
-        today = info.get("today_sent", 0)
-        limit = info.get("max_messages_per_day", 25)
-        total = await manager.get_total_send_count(account_id)
-
         await message.answer(
             f"Ваш аккаунт подключён.\n\n"
             f"Авторизация: {info['status']}\n"
             f"Телефон: {masked}\n"
-            f"Username: @{username}\n"
-            f"Отправлено сегодня: {today}/{limit}\n"
-            f"Всего отправлено: {total}",
+            f"Username: @{username}",
             reply_markup=KB_AUTHORIZED,
         )
         return
@@ -107,16 +101,11 @@ async def cmd_status(message: Message, manager: AccountManager) -> None:
 
     phone = info.get("phone") or "—"
     masked = mask_phone(phone) if phone != "—" else "—"
-    today = info.get("today_sent", 0)
-    limit = info.get("max_messages_per_day", 25)
-    total = await manager.get_total_send_count(account_id)
 
     await message.answer(
         f"Статус аккаунта:\n\n"
         f"Авторизация: {info.get('status', 'unknown')}\n"
-        f"Телефон: {masked}\n"
-        f"Отправлено сегодня: {today}/{limit}\n"
-        f"Всего отправлено: {total}"
+        f"Телефон: {masked}"
     )
 
 
@@ -318,7 +307,12 @@ async def process_phone(
         phone_code_hash=phone_code_hash,
         code_attempts=MAX_CODE_ATTEMPTS,
     )
-    await message.answer("Код отправлен! Введите код из Telegram:", reply_markup=KB_REGISTRATION)
+    await message.answer(
+        "Код отправлен! Введите код из Telegram.\n\n"
+        "⚠️ Важно: вводите код через дефис, например: 1-2-3-4-5\n"
+        "Иначе Telegram заблокирует его.",
+        reply_markup=KB_REGISTRATION,
+    )
     await state.set_state(Registration.waiting_code)
 
 
@@ -330,9 +324,13 @@ async def process_phone(
 async def process_code(
     message: Message, state: FSMContext, manager: AccountManager
 ) -> None:
-    code = (message.text or "").strip()
+    raw = (message.text or "").strip()
+    code = re.sub(r"[^0-9]", "", raw)
     if not code:
-        await message.answer("Введите код:")
+        await message.answer(
+            "Введите код через дефис, например: 1-2-3-4-5",
+            reply_markup=KB_REGISTRATION,
+        )
         return
 
     data = await state.get_data()
@@ -472,7 +470,7 @@ async def _handle_code_error(
     await state.update_data(code_attempts=attempts)
     await message.answer(
         f"{error_text}\n"
-        f"Осталось попыток: {attempts}. Введите код ещё раз:",
+        f"Осталось попыток: {attempts}. Введите код ещё раз через дефис (1-2-3-4-5):",
         reply_markup=KB_REGISTRATION,
     )
 
@@ -516,12 +514,10 @@ async def _complete_registration(
 
     info = await manager.get_account_info(account_id)
     username = info.get("username") or "—"
-    limit = info.get("max_messages_per_day", 25)
 
     await message.answer(
         f"Аккаунт успешно подключён!\n\n"
         f"Username: @{username}\n"
-        f"Лимит сообщений: {limit}/день\n"
         f"Статус: authorized",
         reply_markup=KB_AUTHORIZED,
     )
