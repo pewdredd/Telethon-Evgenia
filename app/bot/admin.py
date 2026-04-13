@@ -1,8 +1,8 @@
 """Admin command handlers for the Telegram bot."""
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import BaseFilter, Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
 from app.account_manager import AccountManager
 
@@ -14,6 +14,13 @@ class AdminFilter(BaseFilter):
         return message.from_user is not None and message.from_user.id in bot_admins
 
 router = Router(name="admin")
+
+KB_ADMIN = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Пользователи"), KeyboardButton(text="Аккаунты")],
+    ],
+    resize_keyboard=True,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -27,7 +34,8 @@ async def cmd_start(message: Message) -> None:
         "/add_user <id или @username> — добавить пользователя\n"
         "/remove_user <id или @username> — удалить пользователя\n"
         "/users — список пользователей\n"
-        "/accounts — список аккаунтов"
+        "/accounts — список аккаунтов",
+        reply_markup=KB_ADMIN,
     )
 
 
@@ -150,3 +158,17 @@ async def cmd_accounts(message: Message, manager: AccountManager) -> None:
         )
 
     await message.answer("Аккаунты:\n\n" + "\n\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# Reply-keyboard text handlers (mirror /users, /accounts)
+# ---------------------------------------------------------------------------
+
+@admin_router.message(F.text == "Пользователи")
+async def btn_users(message: Message, manager: AccountManager) -> None:
+    await cmd_users(message, manager)
+
+
+@admin_router.message(F.text == "Аккаунты")
+async def btn_accounts(message: Message, manager: AccountManager) -> None:
+    await cmd_accounts(message, manager)

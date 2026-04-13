@@ -3,14 +3,14 @@
 import logging
 import re
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
 )
 from telethon.errors import (
     ApiIdInvalidError,
@@ -31,6 +31,18 @@ router = Router(name="registration")
 
 MAX_CODE_ATTEMPTS = 3
 MAX_2FA_ATTEMPTS = 3
+
+KB_REGISTRATION = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="Отмена"), KeyboardButton(text="Назад")]],
+    resize_keyboard=True,
+)
+KB_AUTHORIZED = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Статус")],
+        [KeyboardButton(text="Перерегистрировать")],
+    ],
+    resize_keyboard=True,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -59,12 +71,6 @@ async def cmd_start_registration(
         limit = info.get("max_messages_per_day", 25)
         total = await manager.get_total_send_count(account_id)
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text="Перерегистрировать аккаунт",
-                callback_data="reregister",
-            )]
-        ])
         await message.answer(
             f"Ваш аккаунт подключён.\n\n"
             f"Авторизация: {info['status']}\n"
@@ -72,7 +78,7 @@ async def cmd_start_registration(
             f"Username: @{username}\n"
             f"Отправлено сегодня: {today}/{limit}\n"
             f"Всего отправлено: {total}",
-            reply_markup=keyboard,
+            reply_markup=KB_AUTHORIZED,
         )
         return
 
@@ -114,24 +120,6 @@ async def cmd_status(message: Message, manager: AccountManager) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Re-register callback — inline button from /start
-# ---------------------------------------------------------------------------
-
-@router.callback_query(lambda c: c.data == "reregister")
-async def on_reregister(
-    callback: CallbackQuery, state: FSMContext, manager: AccountManager
-) -> None:
-    account_id = str(callback.from_user.id)
-    try:
-        await manager.remove_account(account_id)
-    except Exception:
-        pass
-
-    await callback.answer()
-    await callback.message.answer("Аккаунт удалён. Начинаем регистрацию заново.")
-    await _prompt_api_id(callback.message, state)
-
 
 # ---------------------------------------------------------------------------
 # /cancel — abort registration at any point
@@ -141,7 +129,7 @@ async def on_reregister(
 async def cmd_cancel(message: Message, state: FSMContext, manager: AccountManager) -> None:
     await _cleanup_account(state, manager)
     await state.clear()
-    await message.answer("Регистрация отменена.")
+    await message.answer("Регистрация отменена.", reply_markup=ReplyKeyboardRemove())
 
 
 # ---------------------------------------------------------------------------
@@ -157,16 +145,16 @@ async def cmd_back(
     if current == Registration.waiting_api_id:
         await _cleanup_account(state, manager)
         await state.clear()
-        await message.answer("Регистрация отменена.")
+        await message.answer("Регистрация отменена.", reply_markup=ReplyKeyboardRemove())
         return
 
     if current == Registration.waiting_api_hash:
-        await message.answer("Введите ваш api_id (числовой):")
+        await message.answer("Введите ваш api_id (числовой):", reply_markup=KB_REGISTRATION)
         await state.set_state(Registration.waiting_api_id)
         return
 
     if current == Registration.waiting_phone:
-        await message.answer("Введите ваш api_hash:")
+        await message.answer("Введите ваш api_hash:", reply_markup=KB_REGISTRATION)
         await state.set_state(Registration.waiting_api_hash)
         return
 
@@ -174,12 +162,47 @@ async def cmd_back(
         await _cleanup_account(state, manager)
         await message.answer(
             "Возврат к вводу номера телефона.\n"
-            "Отправьте номер телефона (в формате +79001234567):"
+            "Отправьте номер телефона (в формате +79001234567):",
+            reply_markup=KB_REGISTRATION,
         )
         await state.set_state(Registration.waiting_phone)
         return
 
     await message.answer("Нечего отменять.")
+
+
+# ---------------------------------------------------------------------------
+# Reply-keyboard text handlers — registered before FSM steps so button
+# presses are not consumed by state handlers.
+# ---------------------------------------------------------------------------
+
+@router.message(F.text == "Отмена", StateFilter("*"))
+async def btn_cancel(message: Message, state: FSMContext, manager: AccountManager) -> None:
+    await cmd_cancel(message, state, manager)
+
+
+@router.message(F.text == "Назад", StateFilter("*"))
+async def btn_back(message: Message, state: FSMContext, manager: AccountManager) -> None:
+    await cmd_back(message, state, manager)
+
+
+@router.message(F.text == "Статус")
+async def btn_status(message: Message, manager: AccountManager) -> None:
+    await cmd_status(message, manager)
+
+
+@router.message(F.text == "Перерегистрировать")
+async def btn_reregister(
+    message: Message, state: FSMContext, manager: AccountManager
+) -> None:
+    account_id = str(message.from_user.id)
+    try:
+        await manager.remove_account(account_id)
+    except Exception:
+        pass
+
+    await message.answer("Аккаунт удалён. Начинаем регистрацию заново.")
+    await _prompt_api_id(message, state)
 
 
 # ---------------------------------------------------------------------------
@@ -191,11 +214,11 @@ async def process_api_id(message: Message, state: FSMContext) -> None:
     try:
         api_id = int(message.text.strip())
     except (ValueError, AttributeError):
-        await message.answer("api_id должен быть числом. Попробуйте ещё раз:")
+        await message.answer("api_id должен быть числом. Попробуйте ещё раз:", reply_markup=KB_REGISTRATION)
         return
 
     await state.update_data(api_id=api_id)
-    await message.answer("Отлично! Теперь отправьте ваш api_hash:")
+    await message.answer("Отлично! Теперь отправьте ваш api_hash:", reply_markup=KB_REGISTRATION)
     await state.set_state(Registration.waiting_api_hash)
 
 
@@ -208,12 +231,13 @@ async def process_api_hash(message: Message, state: FSMContext) -> None:
     api_hash = (message.text or "").strip()
     if len(api_hash) < 10:
         await message.answer(
-            "api_hash слишком короткий (минимум 10 символов). Попробуйте ещё раз:"
+            "api_hash слишком короткий (минимум 10 символов). Попробуйте ещё раз:",
+            reply_markup=KB_REGISTRATION,
         )
         return
 
     await state.update_data(api_hash=api_hash)
-    await message.answer("Теперь отправьте номер телефона (в формате +79001234567):")
+    await message.answer("Теперь отправьте номер телефона (в формате +79001234567):", reply_markup=KB_REGISTRATION)
     await state.set_state(Registration.waiting_phone)
 
 
@@ -228,7 +252,8 @@ async def process_phone(
     phone = (message.text or "").strip()
     if not re.match(r"^\+\d{7,15}$", phone):
         await message.answer(
-            "Неверный формат номера. Отправьте в формате +79001234567:"
+            "Неверный формат номера. Отправьте в формате +79001234567:",
+            reply_markup=KB_REGISTRATION,
         )
         return
 
@@ -253,14 +278,16 @@ async def process_phone(
         await _cleanup_account_by_id(account_id, manager)
         await message.answer(
             "Неверный api_id или api_hash. Начните регистрацию заново.\n\n"
-            "Введите ваш api_id (числовой):"
+            "Введите ваш api_id (числовой):",
+            reply_markup=KB_REGISTRATION,
         )
         await state.set_state(Registration.waiting_api_id)
         return
     except PhoneNumberInvalidError:
         await _cleanup_account_by_id(account_id, manager)
         await message.answer(
-            "Неверный номер телефона. Попробуйте ещё раз:"
+            "Неверный номер телефона. Попробуйте ещё раз:",
+            reply_markup=KB_REGISTRATION,
         )
         return
     except FloodWaitError as e:
@@ -268,7 +295,8 @@ async def process_phone(
         await message.answer(
             f"Telegram требует подождать {e.seconds} секунд перед повторной попыткой.\n"
             "Начните регистрацию позже.\n\n"
-            "Введите ваш api_id (числовой):"
+            "Введите ваш api_id (числовой):",
+            reply_markup=KB_REGISTRATION,
         )
         await state.set_state(Registration.waiting_api_id)
         return
@@ -278,7 +306,8 @@ async def process_phone(
         await message.answer(
             f"Ошибка отправки кода: {e}\n"
             "Начните регистрацию заново.\n\n"
-            "Введите ваш api_id (числовой):"
+            "Введите ваш api_id (числовой):",
+            reply_markup=KB_REGISTRATION,
         )
         await state.set_state(Registration.waiting_api_id)
         return
@@ -289,7 +318,7 @@ async def process_phone(
         phone_code_hash=phone_code_hash,
         code_attempts=MAX_CODE_ATTEMPTS,
     )
-    await message.answer("Код отправлен! Введите код из Telegram:")
+    await message.answer("Код отправлен! Введите код из Telegram:", reply_markup=KB_REGISTRATION)
     await state.set_state(Registration.waiting_code)
 
 
@@ -397,8 +426,8 @@ async def _prompt_api_id(message: Message, state: FSMContext) -> None:
         "3. Откройте «API development tools»\n"
         "4. Создайте приложение (если ещё нет)\n"
         "5. Скопируйте api_id и api_hash\n\n"
-        "Отправьте ваш api_id (числовой):\n\n"
-        "Для отмены — /cancel, для возврата — /back"
+        "Отправьте ваш api_id (числовой):",
+        reply_markup=KB_REGISTRATION,
     )
     await state.set_state(Registration.waiting_api_id)
 
@@ -434,7 +463,8 @@ async def _handle_code_error(
         await message.answer(
             f"{error_text}\n"
             "Попытки исчерпаны. Возврат к вводу номера телефона.\n\n"
-            "Отправьте номер телефона (в формате +79001234567):"
+            "Отправьте номер телефона (в формате +79001234567):",
+            reply_markup=KB_REGISTRATION,
         )
         await state.set_state(Registration.waiting_phone)
         return
@@ -442,7 +472,8 @@ async def _handle_code_error(
     await state.update_data(code_attempts=attempts)
     await message.answer(
         f"{error_text}\n"
-        f"Осталось попыток: {attempts}. Введите код ещё раз:"
+        f"Осталось попыток: {attempts}. Введите код ещё раз:",
+        reply_markup=KB_REGISTRATION,
     )
 
 
@@ -460,7 +491,8 @@ async def _handle_2fa_error(
         await message.answer(
             f"{error_text}\n"
             "Попытки исчерпаны. Возврат к вводу номера телефона.\n\n"
-            "Отправьте номер телефона (в формате +79001234567):"
+            "Отправьте номер телефона (в формате +79001234567):",
+            reply_markup=KB_REGISTRATION,
         )
         await state.set_state(Registration.waiting_phone)
         return
@@ -468,7 +500,8 @@ async def _handle_2fa_error(
     await state.update_data(tfa_attempts=attempts)
     await message.answer(
         f"{error_text}\n"
-        f"Осталось попыток: {attempts}. Введите пароль ещё раз:"
+        f"Осталось попыток: {attempts}. Введите пароль ещё раз:",
+        reply_markup=KB_REGISTRATION,
     )
 
 
@@ -489,6 +522,7 @@ async def _complete_registration(
         f"Аккаунт успешно подключён!\n\n"
         f"Username: @{username}\n"
         f"Лимит сообщений: {limit}/день\n"
-        f"Статус: authorized"
+        f"Статус: authorized",
+        reply_markup=KB_AUTHORIZED,
     )
     await state.clear()
