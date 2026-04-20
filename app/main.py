@@ -68,6 +68,7 @@ class CreateAccountRequest(BaseModel):
     min_delay_seconds: int | None = None
     max_delay_seconds: int | None = None
     forward_incoming: bool | None = None
+    webhook_url: str | None = None
 
 
 class UpdateAccountRequest(BaseModel):
@@ -75,6 +76,7 @@ class UpdateAccountRequest(BaseModel):
     min_delay_seconds: int | None = None
     max_delay_seconds: int | None = None
     forward_incoming: bool | None = None
+    webhook_url: str | None = None
 
 
 class SendRequest(BaseModel):
@@ -176,6 +178,7 @@ async def create_account(
             min_delay_seconds=body.min_delay_seconds,
             max_delay_seconds=body.max_delay_seconds,
             forward_incoming=body.forward_incoming,
+            webhook_url=body.webhook_url,
         )
         return {"ok": True, **result}
     except ValueError as exc:
@@ -213,14 +216,16 @@ async def update_account(
     _api_key: str = Depends(verify_api_key),
     manager: AccountManager = Depends(get_manager),
 ) -> dict:
+    kwargs: dict = {
+        "max_messages_per_day": body.max_messages_per_day,
+        "min_delay_seconds": body.min_delay_seconds,
+        "max_delay_seconds": body.max_delay_seconds,
+        "forward_incoming": body.forward_incoming,
+    }
+    if "webhook_url" in body.model_fields_set:
+        kwargs["webhook_url"] = body.webhook_url
     try:
-        info = await manager.update_account(
-            account_id,
-            max_messages_per_day=body.max_messages_per_day,
-            min_delay_seconds=body.min_delay_seconds,
-            max_delay_seconds=body.max_delay_seconds,
-            forward_incoming=body.forward_incoming,
-        )
+        info = await manager.update_account(account_id, **kwargs)
         return {"ok": True, **info}
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Account {account_id} not found")

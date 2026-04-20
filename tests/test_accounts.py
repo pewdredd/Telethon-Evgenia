@@ -35,7 +35,7 @@ async def test_create_duplicate_account(client):
         json={"account_id": TEST_ACCOUNT_ID, "api_id": 123, "api_hash": "abc"},
         headers={"X-API-Key": "test-key"},
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 409
 
 
 async def test_list_accounts(client):

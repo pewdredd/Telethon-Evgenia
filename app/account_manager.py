@@ -21,6 +21,8 @@ from app.config import Settings
 
 logger = logging.getLogger(__name__)
 
+_UNSET: object = object()
+
 
 class IncomingMessage(TypedDict):
     id: int
@@ -51,6 +53,7 @@ class AccountState:
     min_delay_seconds: int
     max_delay_seconds: int
     forward_incoming: bool = True
+    webhook_url: str | None = None
     qr_login: object | None = None
     listener_cleanup: object | None = None
 
@@ -69,6 +72,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     min_delay_seconds   INTEGER NOT NULL DEFAULT 30,
     max_delay_seconds   INTEGER NOT NULL DEFAULT 90,
     forward_incoming    INTEGER NOT NULL DEFAULT 1,
+    webhook_url         TEXT,
     created_at          TEXT NOT NULL
 )
 """
@@ -149,6 +153,11 @@ class AccountManager:
             )
         except aiosqlite.OperationalError:
             pass
+        # Migration: add webhook_url column to accounts if missing
+        try:
+            await self._db.execute("ALTER TABLE accounts ADD COLUMN webhook_url TEXT")
+        except aiosqlite.OperationalError:
+            pass
         # Migration: bot_users PK change — old schema had telegram_id as PK.
         async with self._db.execute("PRAGMA table_info(bot_users)") as cur:
             columns = {row[1] for row in await cur.fetchall()}
@@ -168,20 +177,26 @@ class AccountManager:
                 pass
         await self._db.commit()
 
+    def _effective_webhook_url(self, state: AccountState) -> str | None:
+        return state.webhook_url or self._settings.incoming_webhook_url
+
     async def load_all(self) -> None:
         """Load all authorized accounts from DB and start their clients/workers."""
         async with self.db.execute(
             "SELECT account_id, api_id, api_hash, session_name, "
-            "max_messages_per_day, min_delay_seconds, max_delay_seconds, forward_incoming "
+            "max_messages_per_day, min_delay_seconds, max_delay_seconds, "
+            "forward_incoming, webhook_url "
             "FROM accounts WHERE status = 'authorized'"
         ) as cursor:
             rows = await cursor.fetchall()
 
         for row in rows:
-            account_id, api_id, api_hash, session_name, max_mpd, min_d, max_d, fwd = row
+            (account_id, api_id, api_hash, session_name, max_mpd, min_d, max_d,
+             fwd, webhook_url) = row
             try:
                 await self._start_account(
-                    account_id, api_id, api_hash, session_name, max_mpd, min_d, max_d, bool(fwd)
+                    account_id, api_id, api_hash, session_name, max_mpd, min_d, max_d,
+                    bool(fwd), webhook_url,
                 )
                 logger.info("Loaded account %s", account_id)
             except Exception:
@@ -197,6 +212,7 @@ class AccountManager:
         min_delay_seconds: int,
         max_delay_seconds: int,
         forward_incoming: bool = True,
+        webhook_url: str | None = None,
     ) -> AccountState:
         session_path = os.path.join(self._settings.sessions_dir, session_name)
         client = telethon_client.create_client(api_id, api_hash, session_path, self._settings.https_proxy)
@@ -218,6 +234,7 @@ class AccountManager:
             min_delay_seconds=min_delay_seconds,
             max_delay_seconds=max_delay_seconds,
             forward_incoming=forward_incoming,
+            webhook_url=webhook_url,
         )
 
         # Start worker only if authorized
@@ -229,7 +246,7 @@ class AccountManager:
             if forward_incoming:
                 from app.listener import register_listener
                 state.listener_cleanup = register_listener(
-                    account_id, client, self, self._settings.incoming_webhook_url
+                    account_id, client, self, self._effective_webhook_url(state)
                 )
 
         self._accounts[account_id] = state
@@ -262,6 +279,7 @@ class AccountManager:
         min_delay_seconds: int | None = None,
         max_delay_seconds: int | None = None,
         forward_incoming: bool | None = None,
+        webhook_url: str | None = None,
     ) -> dict:
         max_mpd = max_messages_per_day if max_messages_per_day is not None else self._settings.max_messages_per_day
         min_d = min_delay_seconds if min_delay_seconds is not None else self._settings.min_delay_seconds
@@ -276,10 +294,10 @@ class AccountManager:
                 "INSERT INTO accounts "
                 "(account_id, api_id, api_hash, phone, session_name, status, "
                 "max_messages_per_day, min_delay_seconds, max_delay_seconds, "
-                "forward_incoming, created_at) "
-                "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
+                "forward_incoming, webhook_url, created_at) "
+                "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
                 (account_id, api_id, api_hash, phone, session_name, max_mpd, min_d, max_d,
-                 1 if fwd else 0, now),
+                 1 if fwd else 0, webhook_url, now),
             )
             await self.db.commit()
         except aiosqlite.IntegrityError:
@@ -287,7 +305,7 @@ class AccountManager:
 
         # Start the client (pending status — not authorized yet, but ready for auth)
         state = await self._start_account(
-            account_id, api_id, api_hash, session_name, max_mpd, min_d, max_d, fwd
+            account_id, api_id, api_hash, session_name, max_mpd, min_d, max_d, fwd, webhook_url
         )
 
         return {
@@ -298,6 +316,7 @@ class AccountManager:
             "min_delay_seconds": min_d,
             "max_delay_seconds": max_d,
             "forward_incoming": fwd,
+            "webhook_url": webhook_url,
             "created_at": now,
         }
 
@@ -313,6 +332,7 @@ class AccountManager:
         min_delay_seconds: int | None = None,
         max_delay_seconds: int | None = None,
         forward_incoming: bool | None = None,
+        webhook_url: str | None | object = _UNSET,
     ) -> dict:
         # Fetch current
         async with self.db.execute(
@@ -336,6 +356,11 @@ class AccountManager:
         if forward_incoming is not None:
             updates.append("forward_incoming = ?")
             params.append(1 if forward_incoming else 0)
+        webhook_changed = False
+        if webhook_url is not _UNSET:
+            updates.append("webhook_url = ?")
+            params.append(webhook_url)
+            webhook_changed = True
 
         if updates:
             params.append(account_id)
@@ -354,6 +379,8 @@ class AccountManager:
                     state.min_delay_seconds = min_delay_seconds
                 if max_delay_seconds is not None:
                     state.max_delay_seconds = max_delay_seconds
+                if webhook_changed:
+                    state.webhook_url = webhook_url  # type: ignore[assignment]
                 if forward_incoming is not None and forward_incoming != state.forward_incoming:
                     state.forward_incoming = forward_incoming
                     if forward_incoming:
@@ -362,13 +389,21 @@ class AccountManager:
                             from app.listener import register_listener
                             state.listener_cleanup = register_listener(
                                 account_id, state.client, self,
-                                self._settings.incoming_webhook_url,
+                                self._effective_webhook_url(state),
                             )
                     else:
                         # True → False: tear down listener if registered
                         if state.listener_cleanup is not None:
                             state.listener_cleanup()
                             state.listener_cleanup = None
+                elif webhook_changed and state.listener_cleanup is not None:
+                    # URL changed while listener already running — re-register with new URL
+                    from app.listener import register_listener
+                    state.listener_cleanup()
+                    state.listener_cleanup = register_listener(
+                        account_id, state.client, self,
+                        self._effective_webhook_url(state),
+                    )
 
         return await self.get_account_info(account_id)
 
@@ -376,7 +411,7 @@ class AccountManager:
         async with self.db.execute(
             "SELECT account_id, api_id, phone, telegram_id, username, session_name, "
             "status, max_messages_per_day, min_delay_seconds, max_delay_seconds, "
-            "forward_incoming, created_at "
+            "forward_incoming, webhook_url, created_at "
             "FROM accounts WHERE account_id = ?",
             (account_id,),
         ) as cursor:
@@ -397,7 +432,8 @@ class AccountManager:
             "min_delay_seconds": row[8],
             "max_delay_seconds": row[9],
             "forward_incoming": bool(row[10]),
-            "created_at": row[11],
+            "webhook_url": row[11],
+            "created_at": row[12],
             "today_sent": today_sent,
         }
 
@@ -436,7 +472,7 @@ class AccountManager:
             if state.forward_incoming:
                 from app.listener import register_listener
                 state.listener_cleanup = register_listener(
-                    account_id, state.client, self, self._settings.incoming_webhook_url
+                    account_id, state.client, self, self._effective_webhook_url(state)
                 )
 
     # --- Worker loop ---

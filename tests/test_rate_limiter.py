@@ -79,13 +79,13 @@ async def test_is_quota_available(test_settings):
 
 async def test_worker_applies_delay(test_settings):
     mgr = await _create_manager_with_account(test_settings)
-    send_fn = AsyncMock(return_value=99)
+    send_fn = AsyncMock(return_value=(99, 1))
 
     with patch("app.telethon_client.send_message", send_fn):
         await mgr.mark_authorized(TEST_ACCOUNT_ID, 1, "u")
         future = await mgr.enqueue_message(TEST_ACCOUNT_ID, "@user", "hello")
         result = await asyncio.wait_for(future, timeout=5)
-        assert result == 99
+        assert result == (99, 1)
 
     await mgr.shutdown_all()
 

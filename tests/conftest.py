@@ -26,7 +26,7 @@ def test_settings(tmp_path) -> Settings:
 
 @pytest.fixture
 def mock_send_message() -> AsyncMock:
-    return AsyncMock(return_value=42)
+    return AsyncMock(return_value=(42, 12345))
 
 
 @pytest_asyncio.fixture

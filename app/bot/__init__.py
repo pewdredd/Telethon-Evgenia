@@ -26,11 +26,15 @@ def create_bot(settings: Settings, manager: AccountManager) -> tuple[Bot, Dispat
     # Outer middleware — runs before any router, enforces whitelist
     dp.update.outer_middleware(WhitelistMiddleware())
 
-    # Routers: start_router first (catches /start for everyone),
-    # then admin_router (admin-only commands)
+    # Routers:
+    # - start_router handles /start (admin-only variant).
+    # - admin_router is registered BEFORE registration_router so its /cancel
+    #   handler for AdminEdit states wins over registration's StateFilter("*").
+    #   admin_router has AdminFilter, so non-admin traffic passes through to
+    #   registration_router unchanged.
     dp.include_router(start_router)
-    dp.include_router(registration_router)
     dp.include_router(admin_router)
+    dp.include_router(registration_router)
 
     return bot, dp
 
