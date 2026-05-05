@@ -56,6 +56,7 @@ class AccountState:
     webhook_url: str | None = None
     qr_login: object | None = None
     listener_cleanup: object | None = None
+    watchdog_task: asyncio.Task | None = None
 
 
 _CREATE_ACCOUNTS = """
@@ -242,6 +243,9 @@ class AccountManager:
             state.worker_task = asyncio.create_task(
                 self._worker(state), name=f"worker-{account_id}"
             )
+            state.watchdog_task = asyncio.create_task(
+                self._connection_watchdog(state), name=f"watchdog-{account_id}"
+            )
             # Register listener only if forwarding is enabled
             if forward_incoming:
                 from app.listener import register_listener
@@ -256,6 +260,12 @@ class AccountManager:
         state = self._accounts.pop(account_id, None)
         if state is None:
             return
+        if state.watchdog_task is not None:
+            state.watchdog_task.cancel()
+            try:
+                await state.watchdog_task
+            except asyncio.CancelledError:
+                pass
         if state.worker_task is not None:
             state.worker_task.cancel()
             try:
@@ -469,6 +479,9 @@ class AccountManager:
             state.worker_task = asyncio.create_task(
                 self._worker(state), name=f"worker-{account_id}"
             )
+            state.watchdog_task = asyncio.create_task(
+                self._connection_watchdog(state), name=f"watchdog-{account_id}"
+            )
             if state.forward_incoming:
                 from app.listener import register_listener
                 state.listener_cleanup = register_listener(
@@ -491,6 +504,14 @@ class AccountManager:
                         None, "error", "quota_exhausted"
                     )
                     continue
+
+                if not state.client.is_connected():
+                    try:
+                        await state.client.connect()
+                    except Exception as exc:
+                        logger.warning(
+                            "Inline reconnect for %s failed: %s", state.account_id, exc
+                        )
 
                 message_id, user_id = await telethon_client.send_message(
                     state.client, item.recipient, item.message
@@ -516,6 +537,76 @@ class AccountManager:
         future: asyncio.Future[tuple[int, int]] = asyncio.get_running_loop().create_future()
         await state.queue.put(_QueueItem(recipient=recipient, message=message, future=future))
         return future
+
+    # --- Connection watchdog ---
+
+    async def _connection_watchdog(self, state: AccountState) -> None:
+        """Periodically check client connectivity and reconnect on failure.
+
+        Runs while the account is active. Cancelled by ``_stop_account``.
+        """
+        interval = self._settings.watchdog_interval_seconds
+        max_attempts = self._settings.max_reconnect_attempts
+        backoff_base = self._settings.reconnect_backoff_base_seconds
+        while True:
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                return
+            if state.client.is_connected():
+                continue
+            logger.warning(
+                "Account %s disconnected, attempting reconnect", state.account_id
+            )
+            connected = False
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    await state.client.connect()
+                    connected = state.client.is_connected()
+                    if connected:
+                        logger.info(
+                            "Account %s reconnected on attempt %d", state.account_id, attempt
+                        )
+                        break
+                except asyncio.CancelledError:
+                    return
+                except Exception as exc:
+                    logger.warning(
+                        "Reconnect attempt %d for %s failed: %s",
+                        attempt, state.account_id, exc,
+                    )
+                try:
+                    await asyncio.sleep(backoff_base * attempt)
+                except asyncio.CancelledError:
+                    return
+            if not connected:
+                logger.error(
+                    "Account %s reconnect gave up after %d attempts; will retry next tick",
+                    state.account_id, max_attempts,
+                )
+
+    # --- Restart ---
+
+    async def restart_account(self, account_id: str) -> None:
+        """Stop and re-start an account's client/worker using DB row.
+
+        Useful for ops recovery without restarting the whole container.
+        """
+        async with self.db.execute(
+            "SELECT api_id, api_hash, session_name, max_messages_per_day, "
+            "min_delay_seconds, max_delay_seconds, forward_incoming, webhook_url "
+            "FROM accounts WHERE account_id = ?",
+            (account_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise KeyError(f"Account {account_id} not found")
+        api_id, api_hash, session_name, max_mpd, min_d, max_d, fwd, webhook_url = row
+        await self._stop_account(account_id)
+        await self._start_account(
+            account_id, api_id, api_hash, session_name, max_mpd, min_d, max_d,
+            bool(fwd), webhook_url,
+        )
 
     # --- Send log ---
 

@@ -294,6 +294,26 @@ async def get_account_health(
     return AccountHealthResponse(status="ok", authorized=True, account=username)
 
 
+# --- Per-account restart ---
+
+@app.post("/accounts/{account_id}/restart", response_model=AccountHealthResponse)
+async def post_account_restart(
+    account_id: str,
+    _api_key: str = Depends(verify_api_key),
+    manager: AccountManager = Depends(get_manager),
+) -> AccountHealthResponse:
+    try:
+        await manager.restart_account(account_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Account {account_id} not found")
+    state = manager.get_account(account_id)
+    me = await telethon_client.get_me(state.client)
+    if me is None:
+        return AccountHealthResponse(status="ok", authorized=False)
+    username = f"@{me['username']}" if me.get("username") else str(me["id"])
+    return AccountHealthResponse(status="ok", authorized=True, account=username)
+
+
 # --- Per-account incoming ---
 
 @app.get("/accounts/{account_id}/incoming", response_model=IncomingListResponse)

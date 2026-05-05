@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     # Proxy for Telegram connections (e.g. http://user:pass@host:port)
     https_proxy: str = ""
 
+    # Connection watchdog
+    watchdog_interval_seconds: int = 30
+    max_reconnect_attempts: int = 5
+    reconnect_backoff_base_seconds: int = 5
+
     # Telegram bot for client self-registration
     bot_token: str = ""
     bot_admins: list[int] = []
